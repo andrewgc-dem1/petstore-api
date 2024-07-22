@@ -372,7 +372,7 @@
 				],
 				"body": {
 					"mode": "raw",
-					"raw": "{\r\n    \"email\": \"aabutler@veracode.com\",\r\n    \"firstname\": \"Aaron\",\r\n    \"id\": 2,\r\n    \"lastname\": \"Butler\",\r\n    \"password\": \"V3RAC0d3\",\r\n    \"phone\": \"555.111.2223\",\r\n    \"userStatus\": 1,\r\n    \"username\": \"aabutler\"\r\n}",
+					"raw": "{\r\n    \"email\": \"someone@veracode.com\",\r\n    \"firstname\": \"John\",\r\n    \"id\": 2,\r\n    \"lastname\": \"Doe\",\r\n    \"password\": \"V3RAC0d3\",\r\n    \"phone\": \"555.111.2223\",\r\n    \"userStatus\": 1,\r\n    \"username\": \"someone\"\r\n}",
 					"options": {
 						"raw": {
 							"language": "json"
@@ -393,7 +393,7 @@
 					"variable": [
 						{
 							"key": "username",
-							"value": "aabutler"
+							"value": "someone"
 						}
 					]
 				}
@@ -436,7 +436,7 @@
 							"variable": [
 								{
 									"key": "username",
-									"value": "aabutler"
+									"value": "someone"
 								}
 							]
 						}
@@ -619,7 +619,7 @@
 	"variable": [
 		{
 			"key": "baseURL1",
-			"value": "http://petstoreapi.aabutler.vuln.sa.veracode.io:5000",
+			"value": "http://petstoreapi.your_name.vuln.sa.veracode.io:5000",
 			"type": "any"
 		}
 	]
