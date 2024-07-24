@@ -31,10 +31,9 @@ def addUser():
         _email = _json['email']
         _password = _json['password']
         _phone = _json['phone']
-        conn = mysql.connect()
-        cursor = conn.cursor()
+        cursor = mysql.connection.cursor()
         if _username and _firstname and _lastname and _email and _password and _phone and request.method == 'POST':
-            cursor.execute("select username FROM users WHERE username='%s'" % (_username))
+            cursor.execute("SELECT username FROM users WHERE username='%s'" % (_username,))
             testUser = cursor.fetchone()
             if testUser:
                 return jsonify(message="User Already Exist"), 409
@@ -42,7 +41,7 @@ def addUser():
                 insertQuery = f"INSERT INTO users (username, firstname, lastname, email, password, phone ) VALUES (%s, %s, %s, %s, %s, %s )"
                 insertValues = ( _username, _firstname, _lastname, _email, _password, _phone )
                 cursor.execute(insertQuery, insertValues)
-                conn.commit()
+                mysql.connection.commit()
                 return jsonify({'message':'User added successfully!', 'id':cursor.lastrowid}), 201
         else:
             return jsonify(message="Server Error"), 500
@@ -55,9 +54,8 @@ def login():
     try:
         _username = request.json["username"]
         _password = request.json["password"]
-        conn = mysql.connect()
-        cursor = conn.cursor()
-        cursor.execute("select username, password FROM users WHERE username='%s' AND password='%s'" % (_username, _password))
+        cursor = mysql.connection.cursor()
+        cursor.execute("SELECT username, password FROM users WHERE username='%s' AND password='%s'" % (_username, _password))
         userRow = cursor.fetchone()
         if userRow:
             access_token = create_access_token(identity=_username, fresh=True, expires_delta=False )
@@ -78,13 +76,12 @@ def updateUser(username):
         _email = _json['email']
         _password = _json['password']
         _phone = _json['phone']
-        conn = mysql.connect()
-        cursor = conn.cursor()
-        cursor.execute("select username FROM users WHERE username='%s'" % (username))
+        cursor = mysql.connection.cursor()
+        cursor.execute("SELECT username FROM users WHERE username='%s'" % (username,))
         testUpdate = cursor.fetchone()
         if testUpdate:
             cursor.execute("UPDATE users SET firstname='%s', lastname='%s', email='%s', password='%s', phone='%s' WHERE username='%s'" % (_firstname, _lastname, _email, _password, _phone, username))
-            conn.commit()
+            mysql.connection.commit()
             response = jsonify(message="User updated successfully!"), 200
             return response
         else:
@@ -97,8 +94,6 @@ def updateUser(username):
 #@jwtRequired
 def allUsers():
     try:
-        #conn = mysql.connect()
-        #cursor = conn.cursor(pymysql.cursors.DictCursor)
         cursor = mysql.connection.cursor()
         cursor.execute("SELECT * FROM users")
         userRows = cursor.fetchall()
@@ -110,9 +105,8 @@ def allUsers():
 @app.route('/api/v1/user/<username>', methods=['GET', 'TRACE', 'OPTIONS'])
 def oneUser(username):
     try:
-        conn = mysql.connect()
-        cursor = conn.cursor(pymysql.cursors.DictCursor)
-        cursor.execute("SELECT * FROM users WHERE username =%s", username)
+        cursor = mysql.connection.cursor()
+        cursor.execute("SELECT * FROM users WHERE username=%s", (username,))
         userRow = cursor.fetchone()
         if userRow:
             return jsonify(userRow), 200
@@ -125,13 +119,12 @@ def oneUser(username):
 @app.route('/api/v1/user/<username>', methods=['DELETE'])
 def deleteUser(username):
     try:
-        conn = mysql.connect()
-        cursor = conn.cursor(pymysql.cursors.DictCursor)
-        cursor.execute("select username FROM users WHERE username='%s'" % (username))
+        cursor = mysql.connection.cursor()
+        cursor.execute("SELECT username FROM users WHERE username='%s'" % (username,))
         testDelete = cursor.fetchone()
         if testDelete:
-            cursor.execute("DELETE FROM users WHERE username =%s", (username))
-            conn.commit()
+            cursor.execute("DELETE FROM users WHERE username=%s", (username,))
+            mysql.connection.commit()
             res = jsonify({'message':'User deleted successfully'})
             res.status_code = 200
             return res
@@ -141,7 +134,7 @@ def deleteUser(username):
         print(e)
 
 # Command Injection
-# example of request: curl 'http://127.0.0.1:5000/admin/sleep%2010'
+# example of request: curl 'http://127.0.0.1:5000/admin/run/sleep%2010'
 @app.route('/admin/run/<command>')
 @jwt_required()
 def run(command):
