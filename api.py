@@ -2,19 +2,17 @@ import pymysql
 import os
 import datetime
 from flask import Flask, jsonify, request
-from flaskext.mysql import MySQL
-
+from flask_mysqldb import MySQL
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token
 
 app = Flask(__name__)
 
 # MySQL Stuff
-mysql = MySQL()
-app.config['MYSQL_DATABASE_HOST'] = '127.0.0.1'
-app.config['MYSQL_DATABASE_USER'] = 'petstore'
-app.config['MYSQL_DATABASE_PASSWORD'] = 'Ver@c0de'
-app.config['MYSQL_DATABASE_DB'] = 'flask_api'
-mysql.init_app(app)
+app.config['MYSQL_HOST'] = '127.0.0.1'
+app.config['MYSQL_USER'] = 'petstore'
+app.config['MYSQL_PASSWORD'] = 'Ver@c0de'
+app.config['MYSQL_DB'] = 'flask_api'
+mysql = MySQL(app)
 
 # JWT Stuff
 app.config["JWT_SECRET_KEY"] = "veracode"
@@ -99,8 +97,9 @@ def updateUser(username):
 #@jwtRequired
 def allUsers():
     try:
-        conn = mysql.connect()
-        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        #conn = mysql.connect()
+        #cursor = conn.cursor(pymysql.cursors.DictCursor)
+        cursor = mysql.connection.cursor()
         cursor.execute("SELECT * FROM users")
         userRows = cursor.fetchall()
         return jsonify(userRows), 200
@@ -151,8 +150,7 @@ def run(command):
 
 def createTableStructure():
     try:
-        conn = mysql.connect()
-        cursor = conn.cursor()
+        cursor = mysql.connection.cursor()
         cursor.execute( 
             """CREATE TABLE IF NOT EXISTS users (
             id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -164,7 +162,7 @@ def createTableStructure():
             phone VARCHAR(45) NULL,
             userStatus INT(11) NULL);"""
         )
-        conn.commit()
+        mysql.connection.commit()
         cursor.execute("select id FROM users WHERE id=1")
         testWeld = cursor.fetchone()
         if testWeld:
@@ -176,7 +174,7 @@ def createTableStructure():
                 VALUES (
                 1, "weld_pond", "Chris", "Wysopal", "weld_pond@veracode.com", "V3RAC0d3", "555.111.2222", 1 );"""
             )
-            conn.commit()
+            mysql.connection.commit()
     except Exception as e:
         print(e)
 
@@ -184,5 +182,7 @@ def createTableStructure():
 # which our scanner will cause many of, the recording of the exception seems to cause a huge spike
 # in the consumed memory
 if __name__ == "__main__":
-    createTableStructure()
+    with app.app_context():
+        createTableStructure()
+        
     app.run(host='0.0.0.0', port=5000, debug=False)
