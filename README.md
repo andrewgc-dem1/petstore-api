@@ -12,7 +12,7 @@ Also, if using a virtual environment, these extra flags are required to build fl
 	export CPPFLAGS="-I/usr/local/opt/openssl/include"
 
 Start MariaDB as shown in the link above.
-To stop MariaDB, run `mysql` and enter the `SHUTDOWN;` command
+To stop MariaDB, run `mysql` and enter the `SHUTDOWN;` command.
 
 ### Dockerfile notes
 
