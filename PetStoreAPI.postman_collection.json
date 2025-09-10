@@ -619,7 +619,7 @@
 	"variable": [
 		{
 			"key": "baseURL1",
-			"value": "http://petstoreapi.your_name.vuln.sa.veracode.io:5000",
+			"value": "http://ubuntu@ec2-54-153-85-203.us-west-1.compute.amazonaws.com",
 			"type": "any"
 		}
 	]
