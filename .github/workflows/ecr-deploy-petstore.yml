@@ -1,5 +1,5 @@
 name: Build, Push to ECR, Deploy to EC2
-# updated with new checks
+# updated with new checks.
 
 on:
   push:
