@@ -130,63 +130,63 @@ jobs:
       
           # Build the remote script safely; bake in values so they're available on the instance
           REMOTE_SCRIPT="$(cat <<EOS
-      #!/bin/bash
-      set -euo pipefail
-      [ "\${DEBUG:-}" = "1" ] && set -x || true
-      
-      # Injected from GitHub runner:
-      AWS_REGION="${AWS_REGION}"
-      AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID}"
-      REPO="${REPO}"
-      
-      echo "=== ENV ==="
-      echo "AWS_REGION=\${AWS_REGION}"
-      echo "AWS_ACCOUNT_ID=\${AWS_ACCOUNT_ID}"
-      echo "REPO=\${REPO}"
-      
-      echo "=== Ensure Docker ==="
-      if ! command -v docker >/dev/null 2>&1; then
-        if command -v apt-get >/dev/null 2>&1; then
-          sudo apt-get update -y
-          sudo apt-get install -y docker.io
-          sudo systemctl enable --now docker || true
-        elif command -v dnf >/dev/null 2>&1; then
-          sudo dnf install -y docker
-          sudo systemctl enable --now docker || true
-        elif command -v yum >/dev/null 2>&1; then
-          sudo yum install -y docker
-          sudo systemctl enable --now docker || true
-        else
-          echo "No supported package manager found to install Docker." >&2
-          exit 2
-        fi
-      fi
-      docker --version || { echo "Docker still not available"; exit 3; }
-      
-      echo "=== ECR Login ==="
-      if ! command -v aws >/dev/null 2>&1; then
-        echo "awscli not present on instance" >&2
-        exit 4
-      fi
-      aws ecr get-login-password --region "\${AWS_REGION}" \
-        | docker login --username AWS --password-stdin "\${AWS_ACCOUNT_ID}.dkr.ecr.\${AWS_REGION}.amazonaws.com"
-      
-      echo "=== Pull & (Re)Run Container ==="
-      docker pull "\${REPO}"
-      docker image inspect "\${REPO}" >/dev/null
-      
-      docker ps -a
-      docker stop petstore || true
-      docker rm   petstore || true
-      
-      docker run -d --name petstore --restart unless-stopped -p 80:5000 "\${REPO}"
-      
-      echo "=== Health check (basic) ==="
-      sleep 2
-      docker ps
-      EOS
-      )"
-      
+          #!/bin/bash
+          set -euo pipefail
+          [ "\${DEBUG:-}" = "1" ] && set -x || true
+          
+          # Injected from GitHub runner:
+          AWS_REGION="${AWS_REGION}"
+          AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID}"
+          REPO="${REPO}"
+          
+          echo "=== ENV ==="
+          echo "AWS_REGION=\${AWS_REGION}"
+          echo "AWS_ACCOUNT_ID=\${AWS_ACCOUNT_ID}"
+          echo "REPO=\${REPO}"
+          
+          echo "=== Ensure Docker ==="
+          if ! command -v docker >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update -y
+              sudo apt-get install -y docker.io
+              sudo systemctl enable --now docker || true
+            elif command -v dnf >/dev/null 2>&1; then
+              sudo dnf install -y docker
+              sudo systemctl enable --now docker || true
+            elif command -v yum >/dev/null 2>&1; then
+              sudo yum install -y docker
+              sudo systemctl enable --now docker || true
+            else
+              echo "No supported package manager found to install Docker." >&2
+              exit 2
+            fi
+          fi
+          docker --version || { echo "Docker still not available"; exit 3; }
+          
+          echo "=== ECR Login ==="
+          if ! command -v aws >/dev/null 2>&1; then
+            echo "awscli not present on instance" >&2
+            exit 4
+          fi
+          aws ecr get-login-password --region "\${AWS_REGION}" \
+            | docker login --username AWS --password-stdin "\${AWS_ACCOUNT_ID}.dkr.ecr.\${AWS_REGION}.amazonaws.com"
+          
+          echo "=== Pull & (Re)Run Container ==="
+          docker pull "\${REPO}"
+          docker image inspect "\${REPO}" >/dev/null
+          
+          docker ps -a
+          docker stop petstore || true
+          docker rm   petstore || true
+          
+          docker run -d --name petstore --restart unless-stopped -p 80:5000 "\${REPO}"
+          
+          echo "=== Health check (basic) ==="
+          sleep 2
+          docker ps
+          EOS
+          )"
+          
           # (Optional) show the first lines of the rendered script for debugging
           echo "----- Rendered remote script (head) -----"
           printf '%s\n' "$REMOTE_SCRIPT" | head -n 25
