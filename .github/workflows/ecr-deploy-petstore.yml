@@ -112,7 +112,7 @@ jobs:
           fi
           echo "Targeting instances: ${INSTANCE_IDS}"
           echo "instance_ids=${INSTANCE_IDS}" >> "$GITHUB_OUTPUT"
-#new code 10-2-25
+          
       - name: Deploy via SSM (pull new image and restart container)
         id: ssm
         env:
@@ -199,7 +199,7 @@ jobs:
             echo "SSM command completed with statuses: $STATUS"
             break
           done
-#end of new code
+          
       - name: Wait for SSM result
         run: |
           set -euo pipefail
