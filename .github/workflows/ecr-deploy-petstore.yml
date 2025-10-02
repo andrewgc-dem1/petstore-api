@@ -130,104 +130,104 @@ jobs:
       
           # Render the remote script robustly (no read -d '' pitfalls)
           REMOTE_SCRIPT="$(cat <<'EOS'
-      #!/bin/bash
-      set -euo pipefail
-      [ "${DEBUG:-}" = "1" ] && set -x || true
-      
-      AWS_REGION="${AWS_REGION:-__MISSING__}"
-      AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-__MISSING__}"
-      REPO="${REPO:-__MISSING__}"
-      
-      echo "=== ENV ==="
-      echo "AWS_REGION=${AWS_REGION}"
-      echo "AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID}"
-      echo "REPO=${REPO}"
-      echo "USER=$(whoami)"
-      
-      echo "=== Ensure Docker installed & running ==="
-      if ! command -v docker >/dev/null 2>&1; then
-        if command -v apt-get >/dev/null 2>&1; then
-          sudo apt-get update -y
-          # install docker + awscli if missing
-          sudo apt-get install -y docker.io awscli || true
-          sudo systemctl enable --now docker || true
-        elif command -v dnf >/dev/null 2>&1; then
-          sudo dnf install -y docker awscli || true
-          sudo systemctl enable --now docker || true
-        elif command -v yum >/dev/null 2>&1; then
-          sudo yum install -y docker awscli || true
-          sudo systemctl enable --now docker || true
-        else
-          echo "No supported package manager found to install Docker/awscli." >&2
-          exit 2
-        fi
-      fi
-      
-      # Make sure service is up (ignore failures on distros without systemd)
-      sudo systemctl start docker 2>/dev/null || true
-      sleep 2
-      
-      # Decide whether we must sudo docker (permission denied case)
-      DOCKER_BIN="docker"
-      if ! docker info >/dev/null 2>&1; then
-        if sudo docker info >/dev/null 2>&1; then
-          DOCKER_BIN="sudo docker"
-          echo "Using sudo for docker commands."
-        else
-          echo "Docker daemon not reachable. Service status:"
-          sudo systemctl status docker --no-pager || true
-          echo "Recent docker logs:"
-          journalctl -u docker --no-pager -n 200 || true
-          exit 3
-        fi
-      fi
-      
-      echo "docker version:"
-      ${DOCKER_BIN} version || true
-      echo "docker info (truncated):"
-      ${DOCKER_BIN} info 2>/dev/null | head -n 50 || true
-      
-      echo "=== Ensure awscli available ==="
-      if ! command -v aws >/dev/null 2>&1; then
-        echo "awscli still missing; attempting install fallback…" >&2
-        if command -v apt-get >/dev/null 2>&1; then
-          sudo apt-get update -y && sudo apt-get install -y awscli || true
-        elif command -v dnf >/dev/null 2>&1; then
-          sudo dnf install -y awscli || true
-        elif command -v yum >/dev/null 2>&1; then
-          sudo yum install -y awscli || true
-        fi
-      fi
-      aws --version || { echo "awscli not present on instance"; exit 4; }
-      
-      echo "=== ECR Login ==="
-      # pipe password to the same docker binary we decided to use
-      aws ecr get-login-password --region "${AWS_REGION}" \
-        | ${DOCKER_BIN} login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-      
-      echo "=== Pull & (Re)Run Container ==="
-      ${DOCKER_BIN} pull "${REPO}"
-      ${DOCKER_BIN} image inspect "${REPO}" >/dev/null
-      
-      ${DOCKER_BIN} ps -a || true
-      ${DOCKER_BIN} stop petstore || true
-      ${DOCKER_BIN} rm   petstore || true
-      
-      # If port 80 is in use, show who has it
-      if ss -lntp 2>/dev/null | grep -qE 'LISTEN .*:80 '; then
-        echo "Port 80 is in use. Showing holders:"
-        ss -lntp | grep -E 'LISTEN .*:80 ' || true
-      fi
-      
-      ${DOCKER_BIN} run -d --name petstore --restart unless-stopped -p 80:5000 "${REPO}"
-      
-      echo "=== Health check (basic) ==="
-      sleep 2
-      ${DOCKER_BIN} ps
-      
-      echo "=== Done ==="
-      EOS
-      )"
+          #!/bin/bash
+          set -euo pipefail
+          [ "${DEBUG:-}" = "1" ] && set -x || true
+          
+          AWS_REGION="${AWS_REGION:-__MISSING__}"
+          AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-__MISSING__}"
+          REPO="${REPO:-__MISSING__}"
+          
+          echo "=== ENV ==="
+          echo "AWS_REGION=${AWS_REGION}"
+          echo "AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID}"
+          echo "REPO=${REPO}"
+          echo "USER=$(whoami)"
+          
+          echo "=== Ensure Docker installed & running ==="
+          if ! command -v docker >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update -y
+              # install docker + awscli if missing
+              sudo apt-get install -y docker.io awscli || true
+              sudo systemctl enable --now docker || true
+            elif command -v dnf >/dev/null 2>&1; then
+              sudo dnf install -y docker awscli || true
+              sudo systemctl enable --now docker || true
+            elif command -v yum >/dev/null 2>&1; then
+              sudo yum install -y docker awscli || true
+              sudo systemctl enable --now docker || true
+            else
+              echo "No supported package manager found to install Docker/awscli." >&2
+              exit 2
+            fi
+          fi
+          
+          # Make sure service is up (ignore failures on distros without systemd)
+          sudo systemctl start docker 2>/dev/null || true
+          sleep 2
+          
+          # Decide whether we must sudo docker (permission denied case)
+          DOCKER_BIN="docker"
+          if ! docker info >/dev/null 2>&1; then
+            if sudo docker info >/dev/null 2>&1; then
+              DOCKER_BIN="sudo docker"
+              echo "Using sudo for docker commands."
+            else
+              echo "Docker daemon not reachable. Service status:"
+              sudo systemctl status docker --no-pager || true
+              echo "Recent docker logs:"
+              journalctl -u docker --no-pager -n 200 || true
+              exit 3
+            fi
+          fi
+          
+          echo "docker version:"
+          ${DOCKER_BIN} version || true
+          echo "docker info (truncated):"
+          ${DOCKER_BIN} info 2>/dev/null | head -n 50 || true
+          
+          echo "=== Ensure awscli available ==="
+          if ! command -v aws >/dev/null 2>&1; then
+            echo "awscli still missing; attempting install fallback…" >&2
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update -y && sudo apt-get install -y awscli || true
+            elif command -v dnf >/dev/null 2>&1; then
+              sudo dnf install -y awscli || true
+            elif command -v yum >/dev/null 2>&1; then
+              sudo yum install -y awscli || true
+            fi
+          fi
+          aws --version || { echo "awscli not present on instance"; exit 4; }
+          
+          echo "=== ECR Login ==="
+          # pipe password to the same docker binary we decided to use
+          aws ecr get-login-password --region "${AWS_REGION}" \
+            | ${DOCKER_BIN} login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          
+          echo "=== Pull & (Re)Run Container ==="
+          ${DOCKER_BIN} pull "${REPO}"
+          ${DOCKER_BIN} image inspect "${REPO}" >/dev/null
+          
+          ${DOCKER_BIN} ps -a || true
+          ${DOCKER_BIN} stop petstore || true
+          ${DOCKER_BIN} rm   petstore || true
+          
+          # If port 80 is in use, show who has it
+          if ss -lntp 2>/dev/null | grep -qE 'LISTEN .*:80 '; then
+            echo "Port 80 is in use. Showing holders:"
+            ss -lntp | grep -E 'LISTEN .*:80 ' || true
+          fi
+          
+          ${DOCKER_BIN} run -d --name petstore --restart unless-stopped -p 80:5000 "${REPO}"
+          
+          echo "=== Health check (basic) ==="
+          sleep 2
+          ${DOCKER_BIN} ps
+          
+          echo "=== Done ==="
+          EOS
+          )"
       
           # Inject the runner envs into the script (so they're set even if not exported by SSM)
           REMOTE_SCRIPT="AWS_REGION='${AWS_REGION}' AWS_ACCOUNT_ID='${AWS_ACCOUNT_ID}' REPO='${REPO}' DEBUG='${DEBUG}' bash -lc $'$(printf %q "$REMOTE_SCRIPT")'"
