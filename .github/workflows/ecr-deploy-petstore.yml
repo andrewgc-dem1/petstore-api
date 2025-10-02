@@ -112,25 +112,35 @@ jobs:
           fi
           echo "Targeting instances: ${INSTANCE_IDS}"
           echo "instance_ids=${INSTANCE_IDS}" >> "$GITHUB_OUTPUT"
-          
-      - name: Deploy via SSM (pull new image and restart container)
+
+      - name: Deploy via SSM (pull new image and restart container) — with debug
         id: ssm
         env:
           REPO_URI: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}
           IMAGE_TAG: ${{ env.IMAGE_TAG }}
           AWS_REGION: ${{ env.AWS_REGION }}
           AWS_ACCOUNT_ID: ${{ env.AWS_ACCOUNT_ID }}
+          INSTANCE_IDS: ${{ steps.find.outputs.instance_ids }}
+          # Set DEBUG=1 to enable local and remote 'set -x'
+          DEBUG: "1"
         run: |
           set -euo pipefail
+          [ "${DEBUG}" = "1" ] && set -x || true
       
           REPO="${REPO_URI}:${IMAGE_TAG}"
       
-          # Build the remote script literally (no escaping headaches)
+          # Build the remote script literally
           read -r -d '' REMOTE_SCRIPT <<'EOS'
           #!/bin/bash
           set -euo pipefail
+          [ "${DEBUG:-}" = "1" ] && set -x || true
       
-          # Install Docker if missing (Ubuntu / Amazon Linux / AL2023)
+          echo "=== ENV ==="
+          echo "AWS_REGION=${AWS_REGION}"
+          echo "AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID}"
+          echo "REPO=${REPO}"
+      
+          echo "=== Ensure Docker ==="
           if ! command -v docker >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
               sudo apt-get update -y
@@ -142,73 +152,105 @@ jobs:
             elif command -v yum >/dev/null 2>&1; then
               sudo yum install -y docker
               sudo systemctl enable --now docker || true
+            else
+              echo "No supported package manager found to install Docker." >&2
+              exit 2
             fi
           fi
+          docker --version || { echo "Docker still not available"; exit 3; }
       
-          # ECR login (instance role)
+          echo "=== ECR Login ==="
+          aws --version || { echo "awscli not present on instance"; exit 4; }
           aws ecr get-login-password --region "$AWS_REGION" \
             | docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
       
-          # Pull and (re)run the container
+          echo "=== Pull & (Re)Run Container ==="
           docker pull "$REPO"
+      
+          # Inspect image to ensure it exists
+          docker image inspect "$REPO" >/dev/null
+      
+          # Stop & remove old container if present
+          docker ps -a
           docker stop petstore || true
           docker rm   petstore || true
+      
+          # Run new container
           docker run -d --name petstore --restart unless-stopped -p 80:5000 "$REPO"
+      
+          echo "=== Health check (basic) ==="
+          sleep 2
+          docker ps
           EOS
       
-          # Package as {"commands": ["<script>"]}
-          PARAMS_JSON=$(jq -nc --arg script "$REMOTE_SCRIPT" '{commands: [$script]}')
+          # Package as {"commands": ["<script>"]} and pass DEBUG/REPO via SSM parameters (available as env vars)
+          PARAMS_JSON=$(jq -nc --arg script "$REMOTE_SCRIPT" '{commands: [$script], executionTimeout: ["3600"], workingDirectory: ["~"]}')
       
-          # Send to all found instances (space-separated list is OK for SSM)
+          # SSM supports InstanceIds as space-separated list
+          echo "Sending SSM command to: ${INSTANCE_IDS}"
           COMMAND_ID=$(
             aws ssm send-command \
               --document-name "AWS-RunShellScript" \
               --comment "Deploy petstore-api container" \
               --parameters "$PARAMS_JSON" \
-              --instance-ids ${{ steps.find.outputs.instance_ids }} \
+              --instance-ids ${INSTANCE_IDS} \
+              --timeout-seconds 3600 \
+              --output text \
               --query "Command.CommandId" \
-              --output text
+              --cloud-watch-output-config "CloudWatchOutputEnabled=false"
           )
-      
           echo "command_id=${COMMAND_ID}" >> "$GITHUB_OUTPUT"
+          echo "SSM CommandId: ${COMMAND_ID}"
       
-          # (Optional) Wait for Success across all instances
-          deadline=$(( $(date +%s) + 600 )) # 10 min timeout
-          while :; do
-            STATUS=$(aws ssm list-command-invocations \
-              --command-id "$COMMAND_ID" \
-              --details \
-              --query 'CommandInvocations[].Status' \
-              --output text || echo "Pending")
+          # Poll each instance and stream stdout/stderr until terminal state
+          overall_rc=0
+          deadline=$(( $(date +%s) + 900 ))  # 15 min deadline
+          for id in ${INSTANCE_IDS}; do
+            echo "=== Streaming output for ${id} (CommandId ${COMMAND_ID}) ==="
+            last_status="Pending"
+            while :; do
+              now=$(date +%s)
+              if [ $now -ge $deadline ]; then
+                echo "::error::Timed out waiting for SSM on ${id}"
+                overall_rc=1
+                break
+              fi
       
-            # If any in-progress states remain, keep waiting
-            if echo "$STATUS" | grep -Eq '^(Pending|InProgress|Delayed)(\s|$)'; then
-              [ "$(date +%s)" -lt "$deadline" ] || { echo "SSM command timed out"; exit 1; }
-              sleep 5
-              continue
-            fi
+              inv=$(aws ssm get-command-invocation \
+                --command-id "${COMMAND_ID}" \
+                --instance-id "${id}" \
+                --output json || true)
       
-            # Fail if any target failed
-            if echo "$STATUS" | grep -q 'Failed'; then
-              echo "One or more instances reported Failed:"
-              aws ssm list-command-invocations --command-id "$COMMAND_ID" --details
-              exit 1
-            fi
+              status=$(echo "${inv}" | jq -r '.Status // "Pending"')
+              details=$(echo "${inv}" | jq -r '.StatusDetails // ""')
       
-            # Otherwise we are done (Success/Cancelled/TimedOut handled above)
-            echo "SSM command completed with statuses: $STATUS"
-            break
+              # Print logs on every loop pass to aid debugging
+              stdout=$(echo "${inv}" | jq -r '.StandardOutputContent // ""')
+              stderr=$(echo "${inv}" | jq -r '.StandardErrorContent // ""')
+      
+              echo "Status: ${status} (${details})"
+              [ -n "${stdout}" ] && echo "----- STDOUT (${id}) -----"$'\n'"${stdout}"
+              [ -n "${stderr}" ] && echo "----- STDERR (${id}) -----"$'\n'"${stderr}"
+      
+              case "${status}" in
+                Pending|InProgress|Delayed)
+                  sleep 5
+                  ;;
+                Success)
+                  echo "✅ ${id} completed successfully."
+                  break
+                  ;;
+                Cancelled|TimedOut|Failed)
+                  echo "::error::${id} ended with ${status} (${details})"
+                  overall_rc=1
+                  break
+                  ;;
+                *)
+                  # Unknown state — keep polling briefly
+                  sleep 5
+                  ;;
+              esac
+            done
           done
-          
-      - name: Wait for SSM result
-        run: |
-          set -euo pipefail
-          for ID in ${{ steps.find.outputs.instance_ids }}; do
-            aws ssm wait command-executed --command-id "${{ steps.ssm.outputs.command_id }}" --instance-id "$ID"
-            STATUS=$(aws ssm get-command-invocation --command-id "${{ steps.ssm.outputs.command_id }}" --instance-id "$ID" --query "Status" --output text)
-            echo "Instance $ID status: $STATUS"
-            if [ "$STATUS" != "Success" ]; then
-              echo "Deployment failed on $ID"
-              exit 1
-            fi
-          done
+      
+          exit ${overall_rc}
