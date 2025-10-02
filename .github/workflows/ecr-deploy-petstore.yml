@@ -112,7 +112,7 @@ jobs:
           fi
           echo "Targeting instances: ${INSTANCE_IDS}"
           echo "instance_ids=${INSTANCE_IDS}" >> "$GITHUB_OUTPUT"
-
+#new code 10-2-25
       - name: Deploy via SSM (pull new image and restart container)
         id: ssm
         env:
@@ -122,35 +122,84 @@ jobs:
           AWS_ACCOUNT_ID: ${{ env.AWS_ACCOUNT_ID }}
         run: |
           set -euo pipefail
+      
           REPO="${REPO_URI}:${IMAGE_TAG}"
-
-          # Build JSON array of commands locally for substitution safety
-          COMMANDS=$(jq -cn --arg region "$AWS_REGION" --arg account "$AWS_ACCOUNT_ID" --arg repo "$REPO" '
-            [
-              "set -euo pipefail",
-              # Install Docker if missing (Ubuntu, Amazon Linux, or AL2023)
-              "(command -v docker >/dev/null 2>&1) || { \
-                 (command -v apt-get >/dev/null 2>&1 && sudo apt-get update -y && sudo apt-get install -y docker.io && sudo systemctl enable --now docker) || \
-                 (command -v dnf >/dev/null 2>&1 && sudo dnf install -y docker && sudo systemctl enable --now docker) || \
-                 (command -v yum >/dev/null 2>&1 && sudo yum install -y docker && sudo systemctl enable --now docker) || true; }",
-              # ECR login using instance role
-              "aws ecr get-login-password --region \($region) | docker login --username AWS --password-stdin \($account).dkr.ecr.\($region).amazonaws.com",
-              # Pull and (re)run the container
-              "docker pull \($repo)",
-              "docker stop petstore || true",
-              "docker rm petstore || true",
-              "docker run -d --name petstore --restart unless-stopped -p 80:5000 \($repo)"
-            ]')
-
-          COMMAND_ID=$(aws ssm send-command \
-            --document-name "AWS-RunShellScript" \
-            --comment "Deploy petstore-api container" \
-            --parameters "commands=${COMMANDS}" \
-            --instance-ids ${{ steps.find.outputs.instance_ids }} \
-            --query "Command.CommandId" --output text)
-
+      
+          # Build the remote script literally (no escaping headaches)
+          read -r -d '' REMOTE_SCRIPT <<'EOS'
+          #!/bin/bash
+          set -euo pipefail
+      
+          # Install Docker if missing (Ubuntu / Amazon Linux / AL2023)
+          if ! command -v docker >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update -y
+              sudo apt-get install -y docker.io
+              sudo systemctl enable --now docker || true
+            elif command -v dnf >/dev/null 2>&1; then
+              sudo dnf install -y docker
+              sudo systemctl enable --now docker || true
+            elif command -v yum >/dev/null 2>&1; then
+              sudo yum install -y docker
+              sudo systemctl enable --now docker || true
+            fi
+          fi
+      
+          # ECR login (instance role)
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+      
+          # Pull and (re)run the container
+          docker pull "$REPO"
+          docker stop petstore || true
+          docker rm   petstore || true
+          docker run -d --name petstore --restart unless-stopped -p 80:5000 "$REPO"
+          EOS
+      
+          # Package as {"commands": ["<script>"]}
+          PARAMS_JSON=$(jq -nc --arg script "$REMOTE_SCRIPT" '{commands: [$script]}')
+      
+          # Send to all found instances (space-separated list is OK for SSM)
+          COMMAND_ID=$(
+            aws ssm send-command \
+              --document-name "AWS-RunShellScript" \
+              --comment "Deploy petstore-api container" \
+              --parameters "$PARAMS_JSON" \
+              --instance-ids ${{ steps.find.outputs.instance_ids }} \
+              --query "Command.CommandId" \
+              --output text
+          )
+      
           echo "command_id=${COMMAND_ID}" >> "$GITHUB_OUTPUT"
-
+      
+          # (Optional) Wait for Success across all instances
+          deadline=$(( $(date +%s) + 600 )) # 10 min timeout
+          while :; do
+            STATUS=$(aws ssm list-command-invocations \
+              --command-id "$COMMAND_ID" \
+              --details \
+              --query 'CommandInvocations[].Status' \
+              --output text || echo "Pending")
+      
+            # If any in-progress states remain, keep waiting
+            if echo "$STATUS" | grep -Eq '^(Pending|InProgress|Delayed)(\s|$)'; then
+              [ "$(date +%s)" -lt "$deadline" ] || { echo "SSM command timed out"; exit 1; }
+              sleep 5
+              continue
+            fi
+      
+            # Fail if any target failed
+            if echo "$STATUS" | grep -q 'Failed'; then
+              echo "One or more instances reported Failed:"
+              aws ssm list-command-invocations --command-id "$COMMAND_ID" --details
+              exit 1
+            fi
+      
+            # Otherwise we are done (Success/Cancelled/TimedOut handled above)
+            echo "SSM command completed with statuses: $STATUS"
+            break
+          done
+#end of new code
       - name: Wait for SSM result
         run: |
           set -euo pipefail
