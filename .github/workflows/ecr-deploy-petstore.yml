@@ -1,17 +1,17 @@
 name: Build, Push to ECR, Deploy to EC2
-# updated with new checks
+# updated with validation + safer IMAGE_URI handling
 
 on:
   push:
-    branches: [ "main" ]   # manual only; change to ["main"] when ready
+    branches: ["main"]     # manual only; change to ["main"] when ready
   workflow_dispatch:
 
 env:
+  # Pull values from repo/org Variables (Settings → Secrets and variables → Actions → Variables)
   AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
   AWS_REGION: ${{ vars.AWS_REGION }}
   ECR_REPO: ${{ vars.ECR_REPO }}
   IMAGE_TAG: latest
-  IMAGE_URI: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/${{ vars.ECR_REPO }}:${{ env.IMAGE_TAG }}
   DEPLOY_TAG_KEY: ${{ vars.DEPLOY_TAG_KEY }}
   DEPLOY_TAG_VALUE: ${{ vars.DEPLOY_TAG_VALUE }}
 
@@ -23,6 +23,20 @@ jobs:
       contents: read
 
     steps:
+      - name: Validate required vars are present
+        run: |
+          set -e
+          MISSING=()
+          for v in AWS_ACCOUNT_ID AWS_REGION ECR_REPO IMAGE_TAG; do
+            if [ -z "${!v:-}" ]; then MISSING+=("$v"); fi
+          done
+          # DEPLOY_TAG_* not needed for this job, so don't fail here on them
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "Missing required variables: ${MISSING[*]}"
+            echo "Set them under: GitHub → Repo → Settings → Secrets and variables → Actions → Variables"
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -31,6 +45,10 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Compute IMAGE_URI for this run
+        run: |
+          echo "IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}" >> "$GITHUB_ENV"
 
       - name: Ensure ECR repository exists
         run: |
@@ -60,6 +78,20 @@ jobs:
       contents: read
 
     steps:
+      - name: Validate deploy vars are present
+        run: |
+          set -e
+          MISSING=()
+          for v in AWS_ACCOUNT_ID AWS_REGION ECR_REPO IMAGE_TAG DEPLOY_TAG_KEY DEPLOY_TAG_VALUE; do
+            if [ -z "${!v:-}" ]; then MISSING+=("$v"); fi
+          done
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "Missing required variables for deploy: ${MISSING[*]}"
+            echo "Set them under: GitHub → Repo → Settings → Secrets and variables → Actions → Variables"
+            exit 1
+          fi
+          echo "IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}" >> "$GITHUB_ENV"
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -69,14 +101,17 @@ jobs:
       - name: Find instances by tag
         id: find
         run: |
+          set -euo pipefail
+          echo "Looking for instances with tag ${DEPLOY_TAG_KEY}=${DEPLOY_TAG_VALUE} in ${AWS_REGION}"
           INSTANCE_IDS=$(aws ec2 describe-instances \
             --filters "Name=tag:${DEPLOY_TAG_KEY},Values=${DEPLOY_TAG_VALUE}" "Name=instance-state-name,Values=running" \
             --query "Reservations[].Instances[].InstanceId" --output text)
-          if [ -z "$INSTANCE_IDS" ]; then
+          if [ -z "${INSTANCE_IDS}" ]; then
             echo "No running instances found with ${DEPLOY_TAG_KEY}=${DEPLOY_TAG_VALUE}"
             exit 1
           fi
-          echo "instance_ids=$INSTANCE_IDS" >> "$GITHUB_OUTPUT"
+          echo "Targeting instances: ${INSTANCE_IDS}"
+          echo "instance_ids=${INSTANCE_IDS}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy via SSM (pull new image and restart container)
         id: ssm
@@ -89,19 +124,21 @@ jobs:
           set -euo pipefail
           REPO="${REPO_URI}:${IMAGE_TAG}"
 
-          # Build JSON array of commands with concrete values substituted here (runner side)
+          # Build JSON array of commands locally for substitution safety
           COMMANDS=$(jq -cn --arg region "$AWS_REGION" --arg account "$AWS_ACCOUNT_ID" --arg repo "$REPO" '
             [
               "set -euo pipefail",
-              # Install Docker (Ubuntu or Amazon Linux)
-              "(command -v docker >/dev/null 2>&1) || { (command -v apt-get >/dev/null 2>&1 && sudo apt-get update -y && sudo apt-get install -y docker.io && sudo systemctl enable --now docker) || (command -v yum >/dev/null 2>&1 && sudo yum install -y docker && sudo systemctl enable --now docker) || true; }",
+              # Install Docker if missing (Ubuntu, Amazon Linux, or AL2023)
+              "(command -v docker >/dev/null 2>&1) || { \
+                 (command -v apt-get >/dev/null 2>&1 && sudo apt-get update -y && sudo apt-get install -y docker.io && sudo systemctl enable --now docker) || \
+                 (command -v dnf >/dev/null 2>&1 && sudo dnf install -y docker && sudo systemctl enable --now docker) || \
+                 (command -v yum >/dev/null 2>&1 && sudo yum install -y docker && sudo systemctl enable --now docker) || true; }",
               # ECR login using instance role
               "aws ecr get-login-password --region \($region) | docker login --username AWS --password-stdin \($account).dkr.ecr.\($region).amazonaws.com",
+              # Pull and (re)run the container
               "docker pull \($repo)",
-              # Stop & remove old container if present
               "docker stop petstore || true",
               "docker rm petstore || true",
-              # Expose 80->5000; change if your app uses a different port
               "docker run -d --name petstore --restart unless-stopped -p 80:5000 \($repo)"
             ]')
 
@@ -112,7 +149,7 @@ jobs:
             --instance-ids ${{ steps.find.outputs.instance_ids }} \
             --query "Command.CommandId" --output text)
 
-          echo "command_id=$COMMAND_ID" >> "$GITHUB_OUTPUT"
+          echo "command_id=${COMMAND_ID}" >> "$GITHUB_OUTPUT"
 
       - name: Wait for SSM result
         run: |
