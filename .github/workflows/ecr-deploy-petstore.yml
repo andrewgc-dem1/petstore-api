@@ -113,6 +113,32 @@ jobs:
           echo "Targeting instances: ${INSTANCE_IDS}"
           echo "instance_ids=${INSTANCE_IDS}" >> "$GITHUB_OUTPUT"
 
+      - name: Sanity — caller and region
+        run: |
+          set -euo pipefail
+          echo "AWS_REGION=${AWS_REGION}"
+          aws sts get-caller-identity
+
+      - name: Guard — instance must be Online in SSM
+        env:
+          INSTANCE_ID: ${{ steps.find.outputs.instance_ids }}
+        run: |
+          set -euo pipefail
+          echo "Checking SSM status for ${INSTANCE_ID} in ${AWS_REGION}"
+          aws ssm describe-instance-information --region "${AWS_REGION}" \
+            --query "InstanceInformationList[?InstanceId==\`${INSTANCE_ID}\`].[InstanceId,PingStatus,AgentVersion,LastPingDateTime]" \
+            --output table || true
+
+          PING=$(aws ssm describe-instance-information --region "${AWS_REGION}" \
+            --query "InstanceInformationList[?InstanceId==\`${INSTANCE_ID}\`].PingStatus | [0]" \
+            --output text || echo "None")
+
+          if [ "${PING}" != "Online" ]; then
+            echo "::error::Instance ${INSTANCE_ID} is not Online in SSM (PingStatus=${PING})."
+            echo "Fix: ensure IAM instance profile attached (AmazonSSMManagedInstanceCore + ECRReadOnly), agent running, and egress to ssm/ec2messages/ssmmessages in ${AWS_REGION}."
+            exit 1
+          fi
+
       - name: Deploy via SSM (debug, sudo-docker fallback, extra logs)
         id: ssm
         env:
