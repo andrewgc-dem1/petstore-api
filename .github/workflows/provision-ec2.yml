@@ -56,4 +56,5 @@ jobs:
           echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
 
       - name: Show launched instance
-        run: echo "Launched EC2 InstanceId: ${{ steps.cfnout.outputs.instance_id }}"
+        run: |
+          echo "Launched EC2 InstanceId: ${{ steps.cfnout.outputs.instance_id }}"
