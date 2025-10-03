@@ -2,7 +2,7 @@ name: Provision EC2 from AMI
 
 on:
   push:
-   branches: ["main"]     # manual only; change to ["main"] when ready..
+   branches: ["main"]     # manual only; change to ["main"] when ready...
   workflow_dispatch:
 
 env:
