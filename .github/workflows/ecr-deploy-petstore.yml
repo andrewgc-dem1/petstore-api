@@ -3,7 +3,7 @@ name: Build, Push to ECR, Deploy to EC2
 
 on:
   push:
-   branches: ["fred"]     # manual only; change to ["main"] when ready
+   branches: ["main"]     # manual only; change to ["main"] when ready
   workflow_dispatch:
 
 env:
