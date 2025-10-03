@@ -1,0 +1,34 @@
+name: Deploy to EKS
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          aws-region: us-west-1
+
+      - name: Install kubectl & helm
+        run: |
+          sudo curl -sL -o /usr/local/bin/kubectl https://amazon-eks.s3.us-west-2.amazonaws.com/1.30.0/2024-07-26/bin/linux/amd64/kubectl
+          sudo chmod +x /usr/local/bin/kubectl
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name petstore-eks --region us-west-1
+
+      - name: Deploy chart
+        run: |
+          helm upgrade --install petstore charts/petstore \
+            --namespace demo --create-namespace \
+            --set image.repository=${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.us-west-1.amazonaws.com/${{ vars.ECR_REPO }} \
+            --set image.tag=${{ github.sha }}
