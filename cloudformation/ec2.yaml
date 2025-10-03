@@ -1,0 +1,47 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Launch EC2 instance for Petstore API from AMI
+
+Parameters:
+  AMIId:
+    Type: String
+    Description: The AMI ID to launch from
+  InstanceType:
+    Type: String
+    Description: EC2 instance type
+  SubnetId:
+    Type: String
+    Description: Subnet to place the EC2 instance
+  SecurityGroupIds:
+    Type: CommaDelimitedList
+    Description: One or more Security Groups
+  IamInstanceProfileName:
+    Type: String
+    Description: IAM instance profile with SSM + ECR access
+  KeyName:
+    Type: String
+    Description: EC2 Key Pair name
+  DeployTagKey:
+    Type: String
+    Description: Tag key for identifying this instance
+  DeployTagValue:
+    Type: String
+    Description: Tag value for identifying this instance
+
+Resources:
+  PetstoreInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AMIId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: !Ref SecurityGroupIds
+      IamInstanceProfile: !Ref IamInstanceProfileName
+      KeyName: !Ref KeyName
+      Tags:
+        - Key: !Ref DeployTagKey
+          Value: !Ref DeployTagValue
+
+Outputs:
+  InstanceId:
+    Description: The ID of the Petstore EC2 instance
+    Value: !Ref PetstoreInstance
