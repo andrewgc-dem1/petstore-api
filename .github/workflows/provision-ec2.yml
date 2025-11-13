@@ -7,7 +7,7 @@ on:
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
-  STACK_NAME: petstore-ec2
+  STACK_NAME: petstore-ec2-${{ github.actor }}-${{ github.run_number }}
   TEMPLATE_FILE: cloudformation/ec2.yaml
 
 jobs:
