@@ -2,7 +2,7 @@ name: Build, Provision EC2, Deploy petstore
 
 on:
   push:
-    branches: ["fred"]     # change to ["main"] when ready
+    branches: ["main"]     # change to ["main"] when ready
   workflow_dispatch:
 
 env:
