@@ -3,7 +3,7 @@ name: Provision EC2 + Build & Deploy petstore-api
 on:
   workflow_dispatch:
   push:
-    branches: ["main"]   # optional – remove if you want only manual
+    branches: ["fred"]   # optional – remove if you want only manual
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
