@@ -1,4 +1,4 @@
-### General notes  11-12-25 agc
+### General notes  11-18-25 agc
 
 This is a bit of a hack, in that both the app and the database (MairaDB) are on the same image/container.
 
