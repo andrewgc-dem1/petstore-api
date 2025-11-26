@@ -200,15 +200,21 @@ jobs:
 
           # Ensure AWS CLI is installed
           if ! command -v aws >/dev/null 2>&1; then
-            echo "AWS CLI not found. Installing..."
+            echo "AWS CLI not found. Installing AWS CLI v2..."
+          
+            # Make sure unzip is available
             if command -v apt-get >/dev/null 2>&1; then
-              sudo apt-get update -y && sudo apt-get install -y awscli
+              sudo apt-get update -y
+              sudo apt-get install -y unzip
             elif command -v yum >/dev/null 2>&1; then
-              sudo yum install -y awscli || sudo yum install -y aws-cli || true
-            else
-              echo "No supported package manager found to install AWS CLI."
-              exit 1
+              sudo yum install -y unzip -y || true
             fi
+          
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip -o awscliv2.zip
+            sudo ./aws/install --update
+          
+            echo "AWS CLI installed: $(aws --version || echo 'unknown')"
           fi
 
           echo "aws version: \$(aws --version || echo 'unknown')"
