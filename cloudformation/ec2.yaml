@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: Launch EC2 instance for Petstore API from AMI
+Description: Launch EC2 instance for Petstore API from AMI with weak TLS via NGINX (Ubuntu)
 
 Parameters:
   AMIId:
@@ -40,6 +40,60 @@ Resources:
       Tags:
         - Key: !Ref DeployTagKey
           Value: !Ref DeployTagValue
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+
+          echo "=== Bootstrapping NGINX with weak TLS for petstore (Ubuntu) ==="
+
+          # Install nginx + openssl (Ubuntu)
+          apt-get update -y
+          DEBIAN_FRONTEND=noninteractive apt-get install -y nginx openssl
+
+          # Create self-signed cert
+          openssl req -x509 -nodes -days 365 \
+            -newkey rsa:2048 \
+            -keyout /etc/nginx/self.key \
+            -out /etc/nginx/self.crt \
+            -subj "/CN=petstore-weak-tls"
+
+          # NGINX server block with intentionally weak TLS
+          cat >/etc/nginx/conf.d/petstore.conf <<'EOF'
+          server {
+              listen 443 ssl;
+              server_name _;
+
+              ssl_certificate /etc/nginx/self.crt;
+              ssl_certificate_key /etc/nginx/self.key;
+
+              # Intentionally weak protocols
+              ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
+
+              # Looser cipher selection (intentionally weak for demo)
+              ssl_ciphers "HIGH:!aNULL:!MD5";
+
+              ssl_prefer_server_ciphers on;
+
+              # Proxy all requests to the petstore container on localhost:5000
+              location / {
+                  proxy_pass http://127.0.0.1:5000;
+                  proxy_set_header Host $$host;
+                  proxy_set_header X-Real-IP $$remote_addr;
+              }
+          }
+          EOF
+
+          # Disable default site (Ubuntu layout)
+          if [ -f /etc/nginx/sites-enabled/default ]; then
+            rm -f /etc/nginx/sites-enabled/default
+          fi
+
+          nginx -t
+          systemctl enable nginx
+          systemctl restart nginx
+
+          echo "=== NGINX weak TLS bootstrap complete ==="
 
 Outputs:
   InstanceId:
