@@ -233,7 +233,7 @@ jobs:
           docker rm petstore || true
 
           echo "Starting new petstore container..."
-          docker run -d --name petstore --restart unless-stopped -p 80:5000 "\$REPO"
+          docker run -d --name petstore --restart unless-stopped -p 127.0.0.1:5000:5000 "\$REPO"
 
           echo "=== Remote deploy script completed ==="
           EOF
