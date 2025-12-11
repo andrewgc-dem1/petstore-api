@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: Launch EC2 instance for Petstore API from AMI with weak TLS via NGINX (Ubuntu)
+Description: Launch EC2 instance for Petstore API from AMI with toggleable TLS via NGINX (Ubuntu)
 
 Parameters:
   AMIId:
@@ -26,6 +26,13 @@ Parameters:
   DeployTagValue:
     Type: String
     Description: Tag value for identifying this instance
+  TlsMode:
+    Type: String
+    Default: Secure          # <--- CHANGE THIS TO 'Secure' WHEN YOU WANT SECURE TLS
+    AllowedValues:
+      - Weak
+      - Secure
+    Description: Toggle between Weak (demo vuln) and Secure TLS for NGINX
 
 Resources:
   PetstoreInstance:
@@ -45,21 +52,26 @@ Resources:
           #!/bin/bash
           set -euo pipefail
 
-          echo "=== Bootstrapping NGINX with weak TLS for petstore (Ubuntu) ==="
+          TLS_MODE='${TlsMode}'
+
+          echo "=== Bootstrapping NGINX with ${TlsMode} TLS for petstore (Ubuntu) ==="
 
           # Install nginx + openssl (Ubuntu)
           apt-get update -y
           DEBIAN_FRONTEND=noninteractive apt-get install -y nginx openssl
 
-          # Create self-signed cert
+          # Create self-signed cert (demo only)
           openssl req -x509 -nodes -days 365 \
             -newkey rsa:2048 \
             -keyout /etc/nginx/self.key \
             -out /etc/nginx/self.crt \
-            -subj "/CN=petstore-weak-tls"
+            -subj "/CN=petstore-tls"
 
-          # NGINX server block with intentionally weak TLS
-          cat >/etc/nginx/conf.d/petstore.conf <<'EOF'
+          if [ "$TLS_MODE" = "Weak" ]; then
+            echo "Using WEAK TLS config for demo"
+
+            # NGINX server block with intentionally weak TLS
+            cat >/etc/nginx/conf.d/petstore.conf <<'EOF'
           server {
               listen 443 ssl;
               server_name _;
@@ -84,6 +96,50 @@ Resources:
           }
           EOF
 
+          else
+            echo "Using SECURE TLS config"
+
+            # NGINX server block with stricter TLS
+            cat >/etc/nginx/conf.d/petstore.conf <<'EOF'
+          server {
+              listen 443 ssl;
+              server_name _;
+
+              ssl_certificate /etc/nginx/self.crt;
+              ssl_certificate_key /etc/nginx/self.key;
+
+              # Allow only modern protocols
+              ssl_protocols TLSv1.2 TLSv1.3;
+
+              # Stronger cipher selection
+              ssl_ciphers "HIGH:!aNULL:!MD5:!3DES:!CAMELLIA";
+              ssl_prefer_server_ciphers on;
+
+              # Recommended additional TLS settings
+              ssl_session_cache shared:SSL:10m;
+              ssl_session_timeout 10m;
+
+              # HSTS (careful on real domains)
+              add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+
+              # Optional hardening headers
+              add_header X-Content-Type-Options nosniff;
+              add_header X-Frame-Options DENY;
+              add_header X-XSS-Protection "1; mode=block";
+
+              # Proxy all requests to the petstore container on localhost:5000
+              location / {
+                  proxy_pass http://127.0.0.1:5000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+          EOF
+
+          fi
+
           # Disable default site (Ubuntu layout)
           if [ -f /etc/nginx/sites-enabled/default ]; then
             rm -f /etc/nginx/sites-enabled/default
@@ -93,7 +149,7 @@ Resources:
           systemctl enable nginx
           systemctl restart nginx
 
-          echo "=== NGINX weak TLS bootstrap complete ==="
+          echo "=== NGINX ${TlsMode} TLS bootstrap complete ==="
 
 Outputs:
   InstanceId:
