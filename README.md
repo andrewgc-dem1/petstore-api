@@ -1,4 +1,4 @@
-### General notes  12-11-25 - testing deployment as private repo
+### General notes  12-11-25 - testing deployment as private repo - take 2 after adding org variables into said repo
 
 This is a bit of a hack, in that both the app and the database (MairaDB) are on the same image/container.
 
