@@ -1,4 +1,4 @@
-### General notes  12-10-25 - testing nginx deploy via CFT -- testing port 443
+### General notes  12-11-25 - testing deployment as private repo
 
 This is a bit of a hack, in that both the app and the database (MairaDB) are on the same image/container.
 
