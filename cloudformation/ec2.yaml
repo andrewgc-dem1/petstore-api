@@ -28,7 +28,7 @@ Parameters:
     Description: Tag value
   TlsMode:
     Type: String
-    Default: Weak
+    Default: Secure
     AllowedValues:
       - Weak
       - Secure
@@ -51,9 +51,10 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash
           set -euo pipefail
+          exec > >(tee -a /var/log/userdata.log | logger -t user-data -s 2>/dev/console) 2>&1
 
           TLS_MODE='${TlsMode}'
-          echo "Provisioning NGINX with TLS mode: $TLS_MODE"
+          echo "=== UserData start: TLS_MODE=$TLS_MODE ==="
 
           apt-get update -y
           DEBIAN_FRONTEND=noninteractive apt-get install -y nginx openssl
@@ -70,7 +71,8 @@ Resources:
 
             cat >/etc/nginx/conf.d/petstore.conf <<'EOF'
           server {
-              listen 443 ssl;
+              listen 0.0.0.0:443 ssl;
+              listen [::]:443 ssl;
               server_name _;
 
               ssl_certificate /etc/nginx/self.crt;
@@ -80,7 +82,7 @@ Resources:
               ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
 
               # Broad cipher allowance (demo)
-              ssl_ciphers HIGH:!aNULL:!MD5;
+              ssl_ciphers "HIGH:!aNULL:!MD5";
               ssl_prefer_server_ciphers on;
 
               location = /tls-info {
@@ -101,7 +103,8 @@ Resources:
 
             cat >/etc/nginx/conf.d/petstore.conf <<'EOF'
           server {
-              listen 443 ssl;
+              listen 0.0.0.0:443 ssl;
+              listen [::]:443 ssl;
               server_name _;
 
               ssl_certificate /etc/nginx/self.crt;
@@ -110,18 +113,11 @@ Resources:
               # Modern TLS only
               ssl_protocols TLSv1.2 TLSv1.3;
 
-              # AEAD + PFS only (no CBC, no RSA key exchange)
-              ssl_ciphers
-                ECDHE-ECDSA-AES256-GCM-SHA384:
-                ECDHE-RSA-AES256-GCM-SHA384:
-                ECDHE-ECDSA-AES128-GCM-SHA256:
-                ECDHE-RSA-AES128-GCM-SHA256:
-                ECDHE-ECDSA-CHACHA20-POLY1305:
-                ECDHE-RSA-CHACHA20-POLY1305;
-
+              # Strong ciphers (AEAD + PFS only). MUST be a single string.
+              ssl_ciphers "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305";
               ssl_prefer_server_ciphers on;
 
-              # Strong ephemeral curves
+              # Strong ephemeral curves (used for ECDHE)
               ssl_ecdh_curve X25519:secp256r1;
 
               ssl_session_cache shared:SSL:10m;
@@ -133,7 +129,7 @@ Resources:
 
               location = /tls-info {
                   default_type text/plain;
-                  return 200 "mode=Secure\nprotocol=$ssl_protocol\ncipher=$ssl_cipher\ncurve=$ssl_curve\n";
+                  return 200 "mode=Secure\nprotocol=$ssl_protocol\ncipher=$ssl_cipher\n";
               }
 
               location / {
@@ -150,11 +146,16 @@ Resources:
           # Disable default site (Ubuntu)
           rm -f /etc/nginx/sites-enabled/default || true
 
+          echo "=== nginx -t ==="
           nginx -t
+
           systemctl enable nginx
           systemctl restart nginx
 
-          echo "NGINX TLS configuration complete. Mode=$TLS_MODE"
+          echo "=== listening sockets ==="
+          ss -lntp | egrep ':443|nginx' || true
+
+          echo "=== UserData complete: TLS_MODE=$TLS_MODE ==="
 
 Outputs:
   InstanceId:
