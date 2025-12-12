@@ -13,54 +13,27 @@ Parameters:
     Description: Subnet ID
   SecurityGroupIds:
     Type: CommaDelimitedList
-    Description: Security groups
+    Description: One or more Security Groups
   IamInstanceProfileName:
     Type: String
-    Description: IAM instance profile
+    Description: IAM instance profile with SSM + ECR access
   KeyName:
     Type: String
-    Description: EC2 key pair
+    Description: EC2 key pair name
   DeployTagKey:
     Type: String
-    Description: Tag key
+    Description: Tag key for identifying this instance
   DeployTagValue:
     Type: String
-    Description: Tag value
+    Description: Tag value for identifying this instance
   TlsMode:
     Type: String
     Default: Secure
     AllowedValues:
       - Weak
       - Secure
-    Description: TLS posture applied at deploy time
+    Description: Toggle between Weak (demo vuln) and Secure TLS for NGINX
 
 Resources:
   PetstoreInstance:
-    Type: AWS::EC2::Instance
-    Properties:
-      ImageId: !Ref AMIId
-      InstanceType: !Ref InstanceType
-      SubnetId: !Ref SubnetId
-      SecurityGroupIds: !Ref SecurityGroupIds
-      IamInstanceProfile: !Ref IamInstanceProfileName
-      KeyName: !Ref KeyName
-      Tags:
-        - Key: !Ref DeployTagKey
-          Value: !Ref DeployTagValue
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -euo pipefail
-
-          TLS_MODE='${TlsMode}'
-          echo "Provisioning NGINX with TLS mode: $TLS_MODE"
-
-          apt-get update -y
-          DEBIAN_FRONTEND=noninteractive apt-get install -y nginx openssl
-
-          # Self-signed cert (demo only)
-          openssl req -x509 -nodes -days 365 \
-            -newkey rsa:2048 \
-            -keyout /etc/nginx/self.key \
-            -out /etc/nginx/self.crt \
-            -subj "/CN=petstore-tls"
+    Type: AWS::E
