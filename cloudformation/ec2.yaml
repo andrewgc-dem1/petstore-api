@@ -53,7 +53,7 @@ Resources:
           set -euo pipefail
 
           TLS_MODE='${TlsMode}'
-          echo "Provisioning NGINX with TLS mode: ${TLS_MODE}"
+          echo "Provisioning NGINX with TLS mode: $TLS_MODE"
 
           apt-get update -y
           DEBIAN_FRONTEND=noninteractive apt-get install -y nginx openssl
@@ -83,8 +83,9 @@ Resources:
               ssl_ciphers HIGH:!aNULL:!MD5;
               ssl_prefer_server_ciphers on;
 
-              location /tls-info {
-                  return 200 "mode=Weak\n";
+              location = /tls-info {
+                  default_type text/plain;
+                  return 200 "mode=Weak\nprotocol=$ssl_protocol\ncipher=$ssl_cipher\n";
               }
 
               location / {
@@ -130,8 +131,9 @@ Resources:
               add_header X-Content-Type-Options nosniff;
               add_header X-Frame-Options DENY;
 
-              location /tls-info {
-                  return 200 "mode=Secure\n";
+              location = /tls-info {
+                  default_type text/plain;
+                  return 200 "mode=Secure\nprotocol=$ssl_protocol\ncipher=$ssl_cipher\ncurve=$ssl_curve\n";
               }
 
               location / {
@@ -146,15 +148,13 @@ Resources:
           fi
 
           # Disable default site (Ubuntu)
-          if [ -f /etc/nginx/sites-enabled/default ]; then
-            rm -f /etc/nginx/sites-enabled/default
-          fi
+          rm -f /etc/nginx/sites-enabled/default || true
 
           nginx -t
           systemctl enable nginx
           systemctl restart nginx
 
-          echo "NGINX TLS configuration complete: ${TLS_MODE}"
+          echo "NGINX TLS configuration complete. Mode=$TLS_MODE"
 
 Outputs:
   InstanceId:
