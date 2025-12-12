@@ -4,24 +4,34 @@ Description: Launch EC2 instance for Petstore API with deploy-time TLS posture (
 Parameters:
   AMIId:
     Type: String
+    Description: AMI ID
   InstanceType:
     Type: String
+    Description: EC2 instance type
   SubnetId:
     Type: String
+    Description: Subnet ID
   SecurityGroupIds:
     Type: CommaDelimitedList
+    Description: Security groups
   IamInstanceProfileName:
     Type: String
+    Description: IAM instance profile
   KeyName:
     Type: String
+    Description: EC2 key pair
   DeployTagKey:
     Type: String
+    Description: Tag key
   DeployTagValue:
     Type: String
+    Description: Tag value
   TlsMode:
     Type: String
     Default: Secure
-    AllowedValues: [Weak, Secure]
+    AllowedValues:
+      - Weak
+      - Secure
     Description: TLS posture applied at deploy time
 
 Resources:
@@ -43,79 +53,14 @@ Resources:
           set -euo pipefail
 
           TLS_MODE='${TlsMode}'
-          echo "Provisioning NGINX with TLS mode: ${TLS_MODE}"
+          echo "Provisioning NGINX with TLS mode: $TLS_MODE"
 
           apt-get update -y
           DEBIAN_FRONTEND=noninteractive apt-get install -y nginx openssl
 
+          # Self-signed cert (demo only)
           openssl req -x509 -nodes -days 365 \
             -newkey rsa:2048 \
             -keyout /etc/nginx/self.key \
             -out /etc/nginx/self.crt \
             -subj "/CN=petstore-tls"
-
-          if [ "$TLS_MODE" = "Weak" ]; then
-            cat >/etc/nginx/conf.d/petstore.conf <<'EOF'
-          server {
-              listen 443 ssl;
-              server_name _;
-
-              ssl_certificate /etc/nginx/self.crt;
-              ssl_certificate_key /etc/nginx/self.key;
-
-              ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
-              ssl_ciphers HIGH:!aNULL:!MD5;
-              ssl_prefer_server_ciphers on;
-
-              location = /tls-info {
-                  default_type text/plain;
-                  return 200 "mode=Weak\nprotocol=$ssl_protocol\ncipher=$ssl_cipher\n";
-              }
-
-              location / {
-                  proxy_pass http://127.0.0.1:5000;
-              }
-          }
-          EOF
-          else
-            cat >/etc/nginx/conf.d/petstore.conf <<'EOF'
-          server {
-              listen 443 ssl;
-              server_name _;
-
-              ssl_certificate /etc/nginx/self.crt;
-              ssl_certificate_key /etc/nginx/self.key;
-
-              ssl_protocols TLSv1.2 TLSv1.3;
-              ssl_ciphers 'ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305';
-              ssl_prefer_server_ciphers on;
-              ssl_ecdh_curve X25519:secp256r1;
-
-              ssl_session_cache shared:SSL:10m;
-              ssl_session_timeout 10m;
-
-              add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
-
-              location = /tls-info {
-                  default_type text/plain;
-                  return 200 "mode=Secure\nprotocol=$ssl_protocol\ncipher=$ssl_cipher\ncurve=$ssl_curve\n";
-              }
-
-              location / {
-                  proxy_pass http://127.0.0.1:5000;
-              }
-          }
-          EOF
-          fi
-
-          rm -f /etc/nginx/sites-enabled/default || true
-          nginx -t
-          systemctl enable nginx
-          systemctl restart nginx
-
-Outputs:
-  InstanceId:
-    Value: !Ref PetstoreInstance
-  TlsMode:
-    Description: TLS posture applied at deploy time
-    Value: !Ref TlsMode
