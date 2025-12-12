@@ -1,4 +1,4 @@
-### General notes  12-12-25 - test1 today more secure check on TLS 
+### General notes  12-12-25 - test1 today more secure check on TLS - tst 2
 
 This is a bit of a hack, in that both the app and the database (MairaDB) are on the same image/container.
 
