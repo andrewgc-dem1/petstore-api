@@ -1,221 +1,166 @@
-name: Provision EC2 + Build & Deploy petstore-api
+AWSTemplateFormatVersion: 2010-09-09
+Description: Launch EC2 instance for Petstore API with deploy-time TLS posture (NGINX)
 
-on:
-  workflow_dispatch:
-  push:
-    branches: ["main"]
+Parameters:
+  AMIId:
+    Type: String
+    Description: AMI ID
+  InstanceType:
+    Type: String
+    Description: EC2 instance type
+  SubnetId:
+    Type: String
+    Description: Subnet ID
+  SecurityGroupIds:
+    Type: CommaDelimitedList
+    Description: Security groups
+  IamInstanceProfileName:
+    Type: String
+    Description: IAM instance profile
+  KeyName:
+    Type: String
+    Description: EC2 key pair
+  DeployTagKey:
+    Type: String
+    Description: Tag key
+  DeployTagValue:
+    Type: String
+    Description: Tag value
+  TlsMode:
+    Type: String
+    Default: Secure
+    AllowedValues:
+      - Weak
+      - Secure
+    Description: TLS posture applied at deploy time
 
-env:
-  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-  AWS_REGION: ${{ vars.AWS_REGION }}
-  ECR_REPO: ${{ vars.ECR_REPO }}
-  IMAGE_TAG: latest
-  TEMPLATE_FILE: cloudformation/ec2.yaml
-  DEPLOY_TAG_KEY: ${{ vars.DEPLOY_TAG_KEY }}
-  DEPLOY_TAG_VALUE: ${{ vars.DEPLOY_TAG_VALUE }}
-
-jobs:
-  ###############################
-  # 1. PROVISION EC2 FROM AMI   #
-  ###############################
-  provision-ec2-cfn:
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Deploy CloudFormation stack
-        env:
-          # build stack name using GitHub expressions (not shell variables)
-          STACK_NAME: petstore-ec2-${{ github.actor }}-${{ github.run_number }}
-        run: |
-          set -euo pipefail
-          set -x
-
-          echo "STACK_NAME='${STACK_NAME}'"
-          echo "AWS_REGION='${AWS_REGION}'"
-          echo "TEMPLATE_FILE='${TEMPLATE_FILE}'"
-
-          if [[ -z "${STACK_NAME}" ]]; then
-            echo "ERROR: STACK_NAME is empty."
-            exit 1
-          fi
-          if [[ -z "${AWS_REGION}" ]]; then
-            echo "ERROR: AWS_REGION is empty."
-            exit 1
-          fi
-
-          ls -l "${TEMPLATE_FILE}"
-
-          # Show the bottom of the template in logs so we can SEE Outputs if present
-          echo "----- tail of template -----"
-          tail -n 60 "${TEMPLATE_FILE}"
-          echo "----------------------------"
-
-          aws cloudformation deploy \
-            --stack-name "${STACK_NAME}" \
-            --template-file "${TEMPLATE_FILE}" \
-            --parameter-overrides \
-              "AMIId=${{ vars.AMI_ID }}" \
-              "InstanceType=${{ vars.INSTANCE_TYPE }}" \
-              "SubnetId=${{ vars.SUBNET_ID }}" \
-              "SecurityGroupIds=${{ vars.SG_IDS }}" \
-              "IamInstanceProfileName=${{ vars.INSTANCE_PROFILE_NAME }}" \
-              "KeyName=${{ vars.KEY_NAME }}" \
-              "DeployTagKey=${{ vars.DEPLOY_TAG_KEY }}" \
-              "DeployTagValue=${{ vars.DEPLOY_TAG_VALUE }}" \
-            --no-fail-on-empty-changeset \
-            --region "${AWS_REGION}"
-
-      - name: Resolve EC2 InstanceId
-        id: cfnout
-        env:
-          STACK_NAME: petstore-ec2-${{ github.actor }}-${{ github.run_number }}
-        run: |
+Resources:
+  PetstoreInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AMIId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: !Ref SecurityGroupIds
+      IamInstanceProfile: !Ref IamInstanceProfileName
+      KeyName: !Ref KeyName
+      Tags:
+        - Key: !Ref DeployTagKey
+          Value: !Ref DeployTagValue
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
           set -euo pipefail
 
-          echo "STACK_NAME='${STACK_NAME}'"
-          echo "AWS_REGION='${AWS_REGION}'"
+          TLS_MODE='${TlsMode}'
+          echo "Provisioning NGINX with TLS mode: ${TLS_MODE}"
 
-          aws cloudformation describe-stacks \
-            --stack-name "${STACK_NAME}" \
-            --region "${AWS_REGION}" \
-            --query "Stacks[0].{Status:StackStatus,Outputs:Outputs}" \
-            --output json
+          apt-get update -y
+          DEBIAN_FRONTEND=noninteractive apt-get install -y nginx openssl
 
-          INSTANCE_ID="$(aws cloudformation describe-stack-resources \
-            --stack-name "${STACK_NAME}" \
-            --region "${AWS_REGION}" \
-            --query "StackResources[?LogicalResourceId=='PetstoreInstance'].PhysicalResourceId" \
-            --output text)"
+          # Self-signed cert (demo only)
+          openssl req -x509 -nodes -days 365 \
+            -newkey rsa:2048 \
+            -keyout /etc/nginx/self.key \
+            -out /etc/nginx/self.crt \
+            -subj "/CN=petstore-tls"
 
-          if [[ -z "${INSTANCE_ID}" || "${INSTANCE_ID}" == "None" ]]; then
-            echo "ERROR: Failed to resolve EC2 InstanceId (got: '${INSTANCE_ID}')"
-            aws cloudformation describe-stack-resources --stack-name "${STACK_NAME}" --region "${AWS_REGION}" --output json
-            exit 1
-          fi
+          if [ "$TLS_MODE" = "Weak" ]; then
+            echo "Applying WEAK TLS configuration"
 
-          echo "InstanceId=${INSTANCE_ID}"
-          echo "instance_id=${INSTANCE_ID}" >> "$GITHUB_OUTPUT"
+            cat >/etc/nginx/conf.d/petstore.conf <<'EOF'
+          server {
+              listen 443 ssl;
+              server_name _;
 
-      - name: Wait for instance to become ready
-        run: |
-          set -euo pipefail
-          aws ec2 wait instance-status-ok \
-            --instance-ids "${{ steps.cfnout.outputs.instance_id }}" \
-            --region "${AWS_REGION}"
+              ssl_certificate /etc/nginx/self.crt;
+              ssl_certificate_key /etc/nginx/self.key;
 
-          echo "EC2 instance is status-ok"
+              # Intentionally weak protocols (demo)
+              ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
 
-    outputs:
-      instance_id: ${{ steps.cfnout.outputs.instance_id }}
+              # Broad cipher allowance (demo)
+              ssl_ciphers HIGH:!aNULL:!MD5;
+              ssl_prefer_server_ciphers on;
 
-  #########################################
-  # 2. BUILD & PUSH IMAGE TO ECR          #
-  #########################################
-  build-and-push:
-    runs-on: ubuntu-latest
-    needs: provision-ec2-cfn
-    permissions:
-      id-token: write
-      contents: read
+              location /tls-info {
+                  return 200 "mode=Weak\n";
+              }
 
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+              location / {
+                  proxy_pass http://127.0.0.1:5000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+              }
+          }
+          EOF
 
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
+          else
+            echo "Applying SECURE TLS configuration"
 
-      - name: Compute IMAGE_URI for this run
-        run: |
-          echo "IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}" >> "$GITHUB_ENV"
-          echo "Using IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}"
+            cat >/etc/nginx/conf.d/petstore.conf <<'EOF'
+          server {
+              listen 443 ssl;
+              server_name _;
 
-      - name: Ensure ECR repository exists
-        run: |
-          set -euo pipefail
-          aws ecr describe-repositories --repository-names "$ECR_REPO" >/dev/null 2>&1 || \
-          aws ecr create-repository --repository-name "$ECR_REPO" >/dev/null
+              ssl_certificate /etc/nginx/self.crt;
+              ssl_certificate_key /etc/nginx/self.key;
 
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
+              # Modern TLS only
+              ssl_protocols TLSv1.2 TLSv1.3;
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+              # AEAD + PFS only (no CBC, no RSA key exchange)
+              ssl_ciphers
+                ECDHE-ECDSA-AES256-GCM-SHA384:
+                ECDHE-RSA-AES256-GCM-SHA384:
+                ECDHE-ECDSA-AES128-GCM-SHA256:
+                ECDHE-RSA-AES128-GCM-SHA256:
+                ECDHE-ECDSA-CHACHA20-POLY1305:
+                ECDHE-RSA-CHACHA20-POLY1305;
 
-      - name: Build and push image to ECR
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ env.IMAGE_URI }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+              ssl_prefer_server_ciphers on;
 
-  #######################################
-  # 3. DEPLOY CONTAINER VIA SSM          #
-  #######################################
-  deploy-to-ec2:
-    runs-on: ubuntu-latest
-    needs: [provision-ec2-cfn, build-and-push]
-    permissions:
-      id-token: write
-      contents: read
+              # Strong ephemeral curves
+              ssl_ecdh_curve X25519:secp256r1;
 
-    steps:
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
+              ssl_session_cache shared:SSL:10m;
+              ssl_session_timeout 10m;
 
-      - name: Deploy container via SSM
-        env:
-          INSTANCE_ID: ${{ needs.provision-ec2-cfn.outputs.instance_id }}
-        run: |
-          set -euo pipefail
+              add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+              add_header X-Content-Type-Options nosniff;
+              add_header X-Frame-Options DENY;
 
-          if [[ -z "${INSTANCE_ID}" || "${INSTANCE_ID}" == "None" ]]; then
-            echo "ERROR: INSTANCE_ID invalid: '${INSTANCE_ID}'"
-            exit 1
+              location /tls-info {
+                  return 200 "mode=Secure\n";
+              }
+
+              location / {
+                  proxy_pass http://127.0.0.1:5000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+          EOF
           fi
 
-          IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}"
+          # Disable default site (Ubuntu)
+          if [ -f /etc/nginx/sites-enabled/default ]; then
+            rm -f /etc/nginx/sites-enabled/default
+          fi
 
-          COMMAND_ID=$(aws ssm send-command \
-            --document-name "AWS-RunShellScript" \
-            --instance-ids "${INSTANCE_ID}" \
-            --parameters commands="[
-              \"set -e\",
-              \"aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com\",
-              \"docker pull ${IMAGE}\",
-              \"docker stop petstore || true\",
-              \"docker rm petstore || true\",
-              \"docker run -d --name petstore --restart unless-stopped -p 127.0.0.1:5000:5000 ${IMAGE}\"
-            ]" \
-            --query "Command.CommandId" \
-            --output text)
+          nginx -t
+          systemctl enable nginx
+          systemctl restart nginx
 
-          aws ssm wait command-executed \
-            --command-id "${COMMAND_ID}" \
-            --instance-id "${INSTANCE_ID}"
+          echo "NGINX TLS configuration complete: ${TLS_MODE}"
 
-          aws ssm get-command-invocation \
-            --command-id "${COMMAND_ID}" \
-            --instance-id "${INSTANCE_ID}" \
-            --query "StandardOutputContent" \
-            --output text
+Outputs:
+  InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref PetstoreInstance
+
+  TlsMode:
+    Description: TLS posture applied at deploy time
+    Value: !Ref TlsMode
