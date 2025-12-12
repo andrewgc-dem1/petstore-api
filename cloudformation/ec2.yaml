@@ -28,7 +28,7 @@ Parameters:
     Description: Tag value
   TlsMode:
     Type: String
-    Default: Secure
+    Default: Weak
     AllowedValues:
       - Weak
       - Secure
