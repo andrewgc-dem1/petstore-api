@@ -1,9 +1,7 @@
 name: Provision EC2 + Build & Deploy petstore-api
 
 on:
-  # Manual button in Actions UI
   workflow_dispatch:
-  # Auto-run on commits to main
   push:
     branches: ["main"]
 
@@ -13,7 +11,6 @@ env:
   ECR_REPO: ${{ vars.ECR_REPO }}
   IMAGE_TAG: latest
 
-  # CFN / tagging
   STACK_NAME: petstore-ec2-${{ github.actor }}-${{ github.run_number }}
   TEMPLATE_FILE: cloudformation/ec2.yaml
   DEPLOY_TAG_KEY: ${{ vars.DEPLOY_TAG_KEY }}
@@ -58,28 +55,51 @@ jobs:
             --region "${AWS_REGION}" \
             --capabilities CAPABILITY_NAMED_IAM
 
-      - name: Get InstanceId from CF output
+      - name: Get InstanceId from CF output (robust)
         id: cfnout
         run: |
           set -euo pipefail
-          INSTANCE_ID=$(aws cloudformation describe-stacks \
+
+          echo "Stack: $STACK_NAME  Region: $AWS_REGION"
+          aws cloudformation describe-stacks \
             --stack-name "$STACK_NAME" \
-            --region "${AWS_REGION}" \
-            --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" \
-            --output text)
-          if [ -z "$INSTANCE_ID" ]; then
-            echo "ERROR: No InstanceId found in CloudFormation outputs."
+            --region "$AWS_REGION" \
+            --query "Stacks[0].{StackStatus:StackStatus,Outputs:Outputs}" \
+            --output json
+
+          INSTANCE_ID="$(
+            aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --region "$AWS_REGION" \
+              --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" \
+              --output text
+          )"
+
+          # IMPORTANT: AWS CLI returns literal "None" when the query yields nothing
+          if [[ -z "${INSTANCE_ID}" || "${INSTANCE_ID}" == "None" ]]; then
+            echo "ERROR: InstanceId output not found (got: '${INSTANCE_ID}')."
+            echo "Dumping full stack description for debugging:"
+            aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" --output json
             exit 1
           fi
+
           echo "InstanceId from CF: $INSTANCE_ID"
           echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
 
       - name: Wait for instance to be ready
         run: |
           set -euo pipefail
+          INSTANCE_ID="${{ steps.cfnout.outputs.instance_id }}"
+
+          if [[ -z "${INSTANCE_ID}" || "${INSTANCE_ID}" == "None" ]]; then
+            echo "ERROR: INSTANCE_ID is invalid: '${INSTANCE_ID}'"
+            exit 1
+          fi
+
           aws ec2 wait instance-status-ok \
-            --instance-ids "${{ steps.cfnout.outputs.instance_id }}" \
-            --region "${AWS_REGION}"
+            --instance-ids "$INSTANCE_ID" \
+            --region "$AWS_REGION"
+
           echo "Instance is now in status-ok."
 
       - name: Show launched instance
@@ -155,7 +175,7 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy to new instance via SSM
+      - name: Deploy to new instance via SSM (wait + print output)
         env:
           INSTANCE_ID: ${{ needs.provision-ec2-cfn.outputs.instance_id }}
           AWS_REGION: ${{ env.AWS_REGION }}
@@ -165,11 +185,15 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [[ -z "${INSTANCE_ID}" || "${INSTANCE_ID}" == "None" ]]; then
+            echo "ERROR: INSTANCE_ID is invalid: '${INSTANCE_ID}'"
+            exit 1
+          fi
+
           echo "Deploying to instance: ${INSTANCE_ID}"
           REPO="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}"
           echo "Will deploy image: $REPO"
 
-          # Build the remote script that will run on the EC2 instance
           REMOTE_SCRIPT="$(cat <<EOF
           #!/bin/bash
           set -euo pipefail
@@ -183,79 +207,4 @@ jobs:
           echo "AWS_ACCOUNT_ID=\$AWS_ACCOUNT_ID"
           echo "REPO=\$REPO"
 
-          # Ensure docker is installed
-          if ! command -v docker >/dev/null 2>&1; then
-            echo "Docker not found. Installing..."
-            if command -v apt-get >/dev/null 2>&1; then
-              sudo apt-get update -y && sudo apt-get install -y docker.io
-              sudo systemctl enable --now docker || true
-            elif command -v yum >/dev/null 2>&1; then
-              sudo yum install -y docker || true
-              sudo systemctl enable --now docker || true
-            else
-              echo "No supported package manager found to install Docker."
-              exit 1
-            fi
-          fi
-
-          # Ensure AWS CLI is installed
-          if ! command -v aws >/dev/null 2>&1; then
-            echo "AWS CLI not found. Installing AWS CLI v2..."
-          
-            # Make sure unzip is available
-            if command -v apt-get >/dev/null 2>&1; then
-              sudo apt-get update -y
-              sudo apt-get install -y unzip
-            elif command -v yum >/dev/null 2>&1; then
-              sudo yum install -y unzip -y || true
-            fi
-          
-            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -o awscliv2.zip
-            sudo ./aws/install --update
-          
-            echo "AWS CLI installed: $(aws --version || echo 'unknown')"
-          fi
-
-          echo "aws version: \$(aws --version || echo 'unknown')"
-          echo "docker version: \$(docker --version || echo 'unknown')"
-
-          echo "Logging in to ECR..."
-          aws ecr get-login-password --region "\$AWS_REGION" \
-            | docker login --username AWS --password-stdin \
-                "\${AWS_ACCOUNT_ID}.dkr.ecr.\${AWS_REGION}.amazonaws.com"
-
-          echo "Pulling image \$REPO ..."
-          docker pull "\$REPO"
-
-          echo "Stopping and removing old petstore container (if any)..."
-          docker stop petstore || true
-          docker rm petstore || true
-
-          echo "Starting new petstore container..."
-          docker run -d --name petstore --restart unless-stopped -p 127.0.0.1:5000:5000 "\$REPO"
-
-          echo "=== Remote deploy script completed ==="
-          EOF
-          )"
-
-          echo "----- REMOTE_SCRIPT (first 25 lines) -----"
-          echo "$REMOTE_SCRIPT" | head -n 25
-          echo "-----------------------------------------"
-
-          # Wrap script in SSM parameters JSON
-          PARAMS_JSON=$(jq -nc --arg script "$REMOTE_SCRIPT" \
-            '{commands: [$script], executionTimeout: ["3600"], workingDirectory: ["~"]}')
-
-          echo "Sending SSM command to instance: ${INSTANCE_ID}"
-          COMMAND_ID=$(aws ssm send-command \
-            --document-name "AWS-RunShellScript" \
-            --comment "Deploy petstore-api container from ECR" \
-            --parameters "$PARAMS_JSON" \
-            --instance-ids "${INSTANCE_ID}" \
-            --region "${AWS_REGION}" \
-            --output text \
-            --query "Command.CommandId")
-
-          echo "SSM CommandId: $COMMAND_ID"
-          echo "You can check the Run Command output in Systems Manager > Run Command > Command ID: $COMMAND_ID"
+          if ! command -v
