@@ -1,38 +1,28 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: Launch EC2 instance for Petstore API from AMI with toggleable TLS via NGINX (Ubuntu)
+Description: Launch EC2 instance for Petstore API with deploy-time TLS posture (NGINX)
 
 Parameters:
   AMIId:
     Type: String
-    Description: The AMI ID to launch from
   InstanceType:
     Type: String
-    Description: EC2 instance type
   SubnetId:
     Type: String
-    Description: Subnet to place the EC2 instance
   SecurityGroupIds:
     Type: CommaDelimitedList
-    Description: One or more Security Groups
   IamInstanceProfileName:
     Type: String
-    Description: IAM instance profile with SSM + ECR access
   KeyName:
     Type: String
-    Description: EC2 Key Pair name
   DeployTagKey:
     Type: String
-    Description: Tag key for identifying this instance
   DeployTagValue:
     Type: String
-    Description: Tag value for identifying this instance
   TlsMode:
     Type: String
-    Default: Secure          # <--- CHANGE THIS TO 'Secure' WHEN YOU WANT SECURE TLS
-    AllowedValues:
-      - Weak
-      - Secure
-    Description: Toggle between Weak (demo vuln) and Secure TLS for NGINX
+    Default: Secure
+    AllowedValues: [Weak, Secure]
+    Description: TLS posture applied at deploy time
 
 Resources:
   PetstoreInstance:
@@ -53,14 +43,11 @@ Resources:
           set -euo pipefail
 
           TLS_MODE='${TlsMode}'
+          echo "Provisioning NGINX with TLS mode: ${TLS_MODE}"
 
-          echo "=== Bootstrapping NGINX with ${TlsMode} TLS for petstore (Ubuntu) ==="
-
-          # Install nginx + openssl (Ubuntu)
           apt-get update -y
           DEBIAN_FRONTEND=noninteractive apt-get install -y nginx openssl
 
-          # Create self-signed cert (demo only)
           openssl req -x509 -nodes -days 365 \
             -newkey rsa:2048 \
             -keyout /etc/nginx/self.key \
@@ -68,9 +55,6 @@ Resources:
             -subj "/CN=petstore-tls"
 
           if [ "$TLS_MODE" = "Weak" ]; then
-            echo "Using WEAK TLS config for demo"
-
-            # NGINX server block with intentionally weak TLS
             cat >/etc/nginx/conf.d/petstore.conf <<'EOF'
           server {
               listen 443 ssl;
@@ -79,27 +63,21 @@ Resources:
               ssl_certificate /etc/nginx/self.crt;
               ssl_certificate_key /etc/nginx/self.key;
 
-              # Intentionally weak protocols
               ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
-
-              # Looser cipher selection (intentionally weak for demo)
-              ssl_ciphers "HIGH:!aNULL:!MD5";
-
+              ssl_ciphers HIGH:!aNULL:!MD5;
               ssl_prefer_server_ciphers on;
 
-              # Proxy all requests to the petstore container on localhost:5000
+              location = /tls-info {
+                  default_type text/plain;
+                  return 200 "mode=Weak\nprotocol=$ssl_protocol\ncipher=$ssl_cipher\n";
+              }
+
               location / {
                   proxy_pass http://127.0.0.1:5000;
-                  proxy_set_header Host $host;
-                  proxy_set_header X-Real-IP $remote_addr;
               }
           }
           EOF
-
           else
-            echo "Using SECURE TLS config"
-
-            # NGINX server block with stricter TLS
             cat >/etc/nginx/conf.d/petstore.conf <<'EOF'
           server {
               listen 443 ssl;
@@ -108,50 +86,36 @@ Resources:
               ssl_certificate /etc/nginx/self.crt;
               ssl_certificate_key /etc/nginx/self.key;
 
-              # Allow only modern protocols
               ssl_protocols TLSv1.2 TLSv1.3;
-
-              # Stronger cipher selection
-              ssl_ciphers "HIGH:!aNULL:!MD5:!3DES:!CAMELLIA";
+              ssl_ciphers 'ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305';
               ssl_prefer_server_ciphers on;
+              ssl_ecdh_curve X25519:secp256r1;
 
-              # Recommended additional TLS settings
               ssl_session_cache shared:SSL:10m;
               ssl_session_timeout 10m;
 
-              # HSTS (careful on real domains)
               add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
 
-              # Optional hardening headers
-              add_header X-Content-Type-Options nosniff;
-              add_header X-Frame-Options DENY;
-              add_header X-XSS-Protection "1; mode=block";
+              location = /tls-info {
+                  default_type text/plain;
+                  return 200 "mode=Secure\nprotocol=$ssl_protocol\ncipher=$ssl_cipher\ncurve=$ssl_curve\n";
+              }
 
-              # Proxy all requests to the petstore container on localhost:5000
               location / {
                   proxy_pass http://127.0.0.1:5000;
-                  proxy_set_header Host $host;
-                  proxy_set_header X-Real-IP $remote_addr;
-                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto $scheme;
               }
           }
           EOF
-
           fi
 
-          # Disable default site (Ubuntu layout)
-          if [ -f /etc/nginx/sites-enabled/default ]; then
-            rm -f /etc/nginx/sites-enabled/default
-          fi
-
+          rm -f /etc/nginx/sites-enabled/default || true
           nginx -t
           systemctl enable nginx
           systemctl restart nginx
 
-          echo "=== NGINX ${TlsMode} TLS bootstrap complete ==="
-
 Outputs:
   InstanceId:
-    Description: The ID of the Petstore EC2 instance
     Value: !Ref PetstoreInstance
+  TlsMode:
+    Description: TLS posture applied at deploy time
+    Value: !Ref TlsMode
