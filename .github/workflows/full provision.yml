@@ -11,7 +11,6 @@ env:
   ECR_REPO: ${{ vars.ECR_REPO }}
   IMAGE_TAG: latest
 
-  STACK_NAME: petstore-ec2-${{ github.actor }}-${{ github.run_number }}
   TEMPLATE_FILE: cloudformation/ec2.yaml
   DEPLOY_TAG_KEY: ${{ vars.DEPLOY_TAG_KEY }}
   DEPLOY_TAG_VALUE: ${{ vars.DEPLOY_TAG_VALUE }}
@@ -22,6 +21,115 @@ jobs:
   ###############################
   provision-ec2-cfn:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      # Use run_id (always present) to avoid any weird empty expansion
+      STACK_NAME: petstore-ec2-${{ github.actor }}-${{ github.run_id }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy CloudFormation stack (no line-continuations)
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -x
+
+          echo "STACK_NAME='${STACK_NAME}'"
+          echo "AWS_REGION='${AWS_REGION}'"
+          echo "TEMPLATE_FILE='${TEMPLATE_FILE}'"
+
+          if [[ -z "${STACK_NAME}" ]]; then
+            echo "ERROR: STACK_NAME is empty"
+            exit 1
+          fi
+          if [[ -z "${AWS_REGION}" ]]; then
+            echo "ERROR: AWS_REGION is empty"
+            exit 1
+          fi
+
+          ls -l "${TEMPLATE_FILE}"
+          echo "----- tail of template -----"
+          tail -n 40 "${TEMPLATE_FILE}"
+          echo "----------------------------"
+
+          # Build the command as an array so it can't break due to CRLF / backslashes
+          cmd=(
+            cloudformation deploy
+            --stack-name "${STACK_NAME}"
+            --template-file "${TEMPLATE_FILE}"
+            --parameter-overrides
+              "AMIId=${{ vars.AMI_ID }}"
+              "InstanceType=${{ vars.INSTANCE_TYPE }}"
+              "SubnetId=${{ vars.SUBNET_ID }}"
+              "SecurityGroupIds=${{ vars.SG_IDS }}"
+              "IamInstanceProfileName=${{ vars.INSTANCE_PROFILE_NAME }}"
+              "KeyName=${{ vars.KEY_NAME }}"
+              "DeployTagKey=${{ vars.DEPLOY_TAG_KEY }}"
+              "DeployTagValue=${{ vars.DEPLOY_TAG_VALUE }}"
+            --no-fail-on-empty-changeset
+            --region "${AWS_REGION}"
+          )
+
+          aws "${cmd[@]}"
+
+      - name: Resolve EC2 InstanceId (from stack resources)
+        id: cfnout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "STACK_NAME='${STACK_NAME}'"
+          echo "AWS_REGION='${AWS_REGION}'"
+
+          aws cloudformation describe-stacks \
+            --stack-name "${STACK_NAME}" \
+            --region "${AWS_REGION}" \
+            --query "Stacks[0].{Status:StackStatus,Outputs:Outputs}" \
+            --output json
+
+          INSTANCE_ID="$(aws cloudformation describe-stack-resources \
+            --stack-name "${STACK_NAME}" \
+            --region "${AWS_REGION}" \
+            --query "StackResources[?LogicalResourceId=='PetstoreInstance'].PhysicalResourceId" \
+            --output text)"
+
+          if [[ -z "${INSTANCE_ID}" || "${INSTANCE_ID}" == "None" ]]; then
+            echo "ERROR: Failed to resolve EC2 InstanceId (got: '${INSTANCE_ID}')"
+            aws cloudformation describe-stack-resources --stack-name "${STACK_NAME}" --region "${AWS_REGION}" --output json
+            exit 1
+          fi
+
+          echo "InstanceId=${INSTANCE_ID}"
+          echo "instance_id=${INSTANCE_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for instance to become ready
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws ec2 wait instance-status-ok \
+            --instance-ids "${{ steps.cfnout.outputs.instance_id }}" \
+            --region "${AWS_REGION}"
+          echo "EC2 instance is status-ok."
+
+    outputs:
+      instance_id: ${{ steps.cfnout.outputs.instance_id }}
+
+  #########################################
+  # 2. BUILD & PUSH IMAGE TO ECR          #
+  #########################################
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: provision-ec2-cfn
     permissions:
       id-token: write
       contents: read
@@ -36,14 +144,100 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy CF stack (EC2 from AMI)
+      - name: Compute IMAGE_URI
+        shell: bash
         run: |
           set -euo pipefail
-          set -x
+          echo "IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}" >> "$GITHUB_ENV"
+          echo "Using IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}"
 
-          # Quick sanity check: prove we're deploying the template we think we are
-          ls -l "$TEMPLATE_FILE"
-          grep -n '^Outputs:' "$TEMPLATE_FILE" || true
+      - name: Ensure ECR repository exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws ecr describe-repositories --repository-names "$ECR_REPO" >/dev/null 2>&1 || \
+          aws ecr create-repository --repository-name "$ECR_REPO" >/dev/null
 
-          aws cloudformation deploy \
-            --stack-nam
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image to ECR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_URI }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  #######################################
+  # 3. DEPLOY CONTAINER VIA SSM          #
+  #######################################
+  deploy-to-ec2:
+    runs-on: ubuntu-latest
+    needs: [provision-ec2-cfn, build-and-push]
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy container via SSM
+        shell: bash
+        env:
+          INSTANCE_ID: ${{ needs.provision-ec2-cfn.outputs.instance_id }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${INSTANCE_ID}" || "${INSTANCE_ID}" == "None" ]]; then
+            echo "ERROR: INSTANCE_ID invalid: '${INSTANCE_ID}'"
+            exit 1
+          fi
+
+          IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}"
+          echo "Deploying IMAGE=${IMAGE} to INSTANCE_ID=${INSTANCE_ID}"
+
+          COMMAND_ID="$(aws ssm send-command \
+            --document-name "AWS-RunShellScript" \
+            --instance-ids "${INSTANCE_ID}" \
+            --parameters commands="[
+              \"set -euo pipefail\",
+              \"aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com\",
+              \"docker pull ${IMAGE}\",
+              \"docker stop petstore || true\",
+              \"docker rm petstore || true\",
+              \"docker run -d --name petstore --restart unless-stopped -p 127.0.0.1:5000:5000 ${IMAGE}\"
+            ]" \
+            --query "Command.CommandId" \
+            --output text)"
+
+          echo "SSM CommandId=${COMMAND_ID}"
+
+          aws ssm wait command-executed \
+            --command-id "${COMMAND_ID}" \
+            --instance-id "${INSTANCE_ID}" \
+            --region "${AWS_REGION}"
+
+          echo "----- SSM STDOUT -----"
+          aws ssm get-command-invocation \
+            --command-id "${COMMAND_ID}" \
+            --instance-id "${INSTANCE_ID}" \
+            --region "${AWS_REGION}" \
+            --query "StandardOutputContent" \
+            --output text || true
+
+          echo "----- SSM STDERR -----"
+          aws ssm get-command-invocation \
+            --command-id "${COMMAND_ID}" \
+            --instance-id "${INSTANCE_ID}" \
+            --region "${AWS_REGION}" \
+            --query "StandardErrorContent" \
+            --output text || true
