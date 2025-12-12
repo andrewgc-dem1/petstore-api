@@ -10,7 +10,6 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   ECR_REPO: ${{ vars.ECR_REPO }}
   IMAGE_TAG: latest
-
   TEMPLATE_FILE: cloudformation/ec2.yaml
   DEPLOY_TAG_KEY: ${{ vars.DEPLOY_TAG_KEY }}
   DEPLOY_TAG_VALUE: ${{ vars.DEPLOY_TAG_VALUE }}
@@ -25,7 +24,6 @@ jobs:
       id-token: write
       contents: read
     env:
-      # Use run_id (always present) to avoid any weird empty expansion
       STACK_NAME: petstore-ec2-${{ github.actor }}-${{ github.run_id }}
 
     steps:
@@ -48,21 +46,11 @@ jobs:
           echo "AWS_REGION='${AWS_REGION}'"
           echo "TEMPLATE_FILE='${TEMPLATE_FILE}'"
 
-          if [[ -z "${STACK_NAME}" ]]; then
-            echo "ERROR: STACK_NAME is empty"
-            exit 1
-          fi
-          if [[ -z "${AWS_REGION}" ]]; then
-            echo "ERROR: AWS_REGION is empty"
-            exit 1
-          fi
-
           ls -l "${TEMPLATE_FILE}"
           echo "----- tail of template -----"
           tail -n 40 "${TEMPLATE_FILE}"
           echo "----------------------------"
 
-          # Build the command as an array so it can't break due to CRLF / backslashes
           cmd=(
             cloudformation deploy
             --stack-name "${STACK_NAME}"
@@ -88,15 +76,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "STACK_NAME='${STACK_NAME}'"
-          echo "AWS_REGION='${AWS_REGION}'"
-
-          aws cloudformation describe-stacks \
-            --stack-name "${STACK_NAME}" \
-            --region "${AWS_REGION}" \
-            --query "Stacks[0].{Status:StackStatus,Outputs:Outputs}" \
-            --output json
-
           INSTANCE_ID="$(aws cloudformation describe-stack-resources \
             --stack-name "${STACK_NAME}" \
             --region "${AWS_REGION}" \
@@ -112,7 +91,7 @@ jobs:
           echo "InstanceId=${INSTANCE_ID}"
           echo "instance_id=${INSTANCE_ID}" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for instance to become ready
+      - name: Wait for EC2 instance checks
         shell: bash
         run: |
           set -euo pipefail
@@ -190,7 +169,7 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy container via SSM
+      - name: Deploy container via SSM (self-healing + debug)
         shell: bash
         env:
           INSTANCE_ID: ${{ needs.provision-ec2-cfn.outputs.instance_id }}
@@ -205,39 +184,114 @@ jobs:
           IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}"
           echo "Deploying IMAGE=${IMAGE} to INSTANCE_ID=${INSTANCE_ID}"
 
+          REMOTE_SCRIPT="$(cat <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+
+          echo "=== Remote deploy start ==="
+          echo "whoami: $(whoami)"
+          echo "uname: $(uname -a)"
+          echo "date: $(date -Is)"
+
+          # Ensure docker
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "Docker not found; installing..."
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update -y
+              sudo apt-get install -y docker.io
+              sudo systemctl enable --now docker
+            elif command -v yum >/dev/null 2>&1; then
+              sudo yum install -y docker || true
+              sudo systemctl enable --now docker || true
+            else
+              echo "No supported package manager to install docker."
+              exit 1
+            fi
+          fi
+
+          sudo systemctl start docker || true
+          sudo systemctl is-active docker || (echo "Docker service not active" && sudo systemctl status docker || true && exit 1)
+
+          # Ensure awscli
+          if ! command -v aws >/dev/null 2>&1; then
+            echo "AWS CLI not found; installing v2..."
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update -y
+              sudo apt-get install -y unzip
+            elif command -v yum >/dev/null 2>&1; then
+              sudo yum install -y unzip || true
+            fi
+            curl -sS "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip -o awscliv2.zip >/dev/null
+            sudo ./aws/install --update
+          fi
+
+          echo "aws: $(aws --version 2>&1 || true)"
+          echo "docker: $(docker --version 2>&1 || true)"
+
+          AWS_REGION="__AWS_REGION__"
+          AWS_ACCOUNT_ID="__AWS_ACCOUNT_ID__"
+          IMAGE="__IMAGE__"
+
+          echo "Logging into ECR..."
+          aws ecr get-login-password --region "${AWS_REGION}" \
+            | docker login --username AWS --password-stdin \
+              "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+          echo "Pulling ${IMAGE} ..."
+          docker pull "${IMAGE}"
+
+          echo "Stopping old container..."
+          docker stop petstore || true
+          docker rm petstore || true
+
+          echo "Starting new container..."
+          docker run -d --name petstore --restart unless-stopped -p 127.0.0.1:5000:5000 "${IMAGE}"
+
+          echo "=== Remote deploy complete ==="
+          EOF
+          )"
+
+          # Substitute runtime values safely
+          REMOTE_SCRIPT="${REMOTE_SCRIPT/__AWS_REGION__/${AWS_REGION}}"
+          REMOTE_SCRIPT="${REMOTE_SCRIPT/__AWS_ACCOUNT_ID__/${AWS_ACCOUNT_ID}}"
+          REMOTE_SCRIPT="${REMOTE_SCRIPT/__IMAGE__/${IMAGE}}"
+
+          PARAMS_JSON=$(jq -nc --arg script "$REMOTE_SCRIPT" '{commands: [$script], executionTimeout:["3600"], workingDirectory:["~"]}')
+
           COMMAND_ID="$(aws ssm send-command \
             --document-name "AWS-RunShellScript" \
+            --comment "Deploy petstore-api container from ECR" \
+            --parameters "$PARAMS_JSON" \
             --instance-ids "${INSTANCE_ID}" \
-            --parameters commands="[
-              \"set -euo pipefail\",
-              \"aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com\",
-              \"docker pull ${IMAGE}\",
-              \"docker stop petstore || true\",
-              \"docker rm petstore || true\",
-              \"docker run -d --name petstore --restart unless-stopped -p 127.0.0.1:5000:5000 ${IMAGE}\"
-            ]" \
+            --region "${AWS_REGION}" \
             --query "Command.CommandId" \
             --output text)"
 
           echo "SSM CommandId=${COMMAND_ID}"
 
+          set +e
           aws ssm wait command-executed \
             --command-id "${COMMAND_ID}" \
             --instance-id "${INSTANCE_ID}" \
             --region "${AWS_REGION}"
+          WAIT_RC=$?
+          set -e
 
-          echo "----- SSM STDOUT -----"
-          aws ssm get-command-invocation \
+          INVOCATION_JSON="$(aws ssm get-command-invocation \
             --command-id "${COMMAND_ID}" \
             --instance-id "${INSTANCE_ID}" \
             --region "${AWS_REGION}" \
-            --query "StandardOutputContent" \
-            --output text || true
+            --output json || true)"
 
-          echo "----- SSM STDERR -----"
-          aws ssm get-command-invocation \
-            --command-id "${COMMAND_ID}" \
-            --instance-id "${INSTANCE_ID}" \
-            --region "${AWS_REGION}" \
-            --query "StandardErrorContent" \
-            --output text || true
+          echo "----- SSM INVOCATION (summary) -----"
+          echo "${INVOCATION_JSON}" | jq -r '{Status,StatusDetails,ResponseCode,StandardOutputContent,StandardErrorContent}'
+          echo "------------------------------------"
+
+          STATUS="$(echo "${INVOCATION_JSON}" | jq -r '.Status // empty')"
+          if [[ "${STATUS}" != "Success" ]]; then
+            echo "ERROR: SSM command failed. Status=${STATUS} WaitRC=${WAIT_RC}"
+            exit 1
+          fi
+
+          echo "SSM command succeeded."
