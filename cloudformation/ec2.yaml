@@ -1,39 +1,49 @@
-AWSTemplateFormatVersion: 2010-09-09
-Description: Launch EC2 instance for Petstore API with deploy-time TLS posture (NGINX)
+name: Provision EC2 + Build & Deploy petstore-api
 
-Parameters:
-  AMIId:
-    Type: String
-    Description: AMI ID
-  InstanceType:
-    Type: String
-    Description: EC2 instance type
-  SubnetId:
-    Type: String
-    Description: Subnet ID
-  SecurityGroupIds:
-    Type: CommaDelimitedList
-    Description: One or more Security Groups
-  IamInstanceProfileName:
-    Type: String
-    Description: IAM instance profile with SSM + ECR access
-  KeyName:
-    Type: String
-    Description: EC2 key pair name
-  DeployTagKey:
-    Type: String
-    Description: Tag key for identifying this instance
-  DeployTagValue:
-    Type: String
-    Description: Tag value for identifying this instance
-  TlsMode:
-    Type: String
-    Default: Secure
-    AllowedValues:
-      - Weak
-      - Secure
-    Description: Toggle between Weak (demo vuln) and Secure TLS for NGINX
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
 
-Resources:
-  PetstoreInstance:
-    Type: AWS::E
+env:
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPO: ${{ vars.ECR_REPO }}
+  IMAGE_TAG: latest
+  TEMPLATE_FILE: cloudformation/ec2.yaml
+  DEPLOY_TAG_KEY: ${{ vars.DEPLOY_TAG_KEY }}
+  DEPLOY_TAG_VALUE: ${{ vars.DEPLOY_TAG_VALUE }}
+
+jobs:
+  ###############################
+  # 1. PROVISION EC2 FROM AMI   #
+  ###############################
+  provision-ec2-cfn:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      STACK_NAME: petstore-ec2-${{ github.actor }}-${{ github.run_number }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy CloudFormation stack
+        run: |
+          set -euo pipefail
+          set -x
+
+          echo "STACK_NAME=${STACK_NAME}"
+          echo "AWS_REGION=${AWS_REGION}"
+          echo "TEMPLATE_FILE=${TEMPLATE_FILE}"
+
+          ls -l "${TEMPLATE_FILE}"
+          grep -n '^Outputs:' "${TEMPLATE_FILE}" || (echo_
